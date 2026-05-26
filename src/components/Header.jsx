@@ -47,7 +47,9 @@ const Header = () => {
     { name: t('marketPrices'), path: '/market-prices' },
     { name: t('schemes'), path: '/schemes' },
     { name: t('advisories'), path: '/advisories' },
-    { name: t('contact'), path: '/contact' }
+    { name: t('contact'), path: '/contact' },
+    { name: t('ndviMap'), path: '/ndvi-map' },
+    { name: t('smsAlerts'), path: '/sms-alerts' }
   ]
 
   const handleLogout = () => {

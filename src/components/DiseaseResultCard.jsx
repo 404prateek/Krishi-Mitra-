@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION PARSER
@@ -202,13 +202,31 @@ export default function DiseaseResultCard({
   weatherAdvisory,      // string — contextual weather tip
   mandiAdvisory,        // string — contextual mandi/market tip
 }) {
-  const [visible, setVisible] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [visible, setVisible]     = useState(false);
+  const [expanded, setExpanded]   = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const stallGuardRef = useRef(null);
+  const speakFnRef    = useRef(null);  // set after data/sections are computed
 
   useEffect(() => {
     const t = setTimeout(() => setVisible(true), 60);
     return () => clearTimeout(t);
   }, [parsed, geminiResponse]);
+
+  // Auto-read the report when new data arrives (1.1s delay lets animation finish)
+  useEffect(() => {
+    if (!parsed && !geminiResponse) return;
+    const t = setTimeout(() => speakFnRef.current?.(), 1100);
+    return () => clearTimeout(t);
+  }, [parsed, geminiResponse]);
+
+  // Stop speech on unmount
+  useEffect(() => {
+    return () => {
+      window.speechSynthesis?.cancel();
+      clearInterval(stallGuardRef.current);
+    };
+  }, []);
 
   // Normalise input — accept either raw string or parsed object
   let data = parsed;
@@ -254,6 +272,72 @@ export default function DiseaseResultCard({
           weatherAdvisory:"കാലാവസ്ഥ ഉപദേശം", mandiIntel:"മണ്ടി വില വിവരം" },
   };
   const T = L[language] ?? L.en;
+
+  // ── TTS helpers ─────────────────────────────────────────────────────────
+  function _buildScript() {
+    const p = [];
+    if (data.isHealthy) {
+      p.push(`${T.report}. ${data.crop || ''} ${T.healthy}.`);
+    } else {
+      p.push(`${T.report}.`);
+      p.push(`${T.detected}: ${data.diseaseName}${data.crop ? ' — ' + data.crop : ''}.`);
+      p.push(`${T.severity}: ${sev.label}.`);
+      if (data.confidence != null) p.push(`${data.confidence}%.`);
+    }
+    if (sections.ECONOMIC_IMPACT) p.push(`${T.economicImpact}. ${sections.ECONOMIC_IMPACT}.`);
+    if (sections.DISEASE_SUMMARY)  p.push(sections.DISEASE_SUMMARY);
+    if (Array.isArray(sections.VISIBLE_SYMPTOMS) && sections.VISIBLE_SYMPTOMS.length)
+      p.push(`${T.symptoms}: ${sections.VISIBLE_SYMPTOMS.join('. ')}.`);
+    if (Array.isArray(sections.IMMEDIATE_ACTION_48H) && sections.IMMEDIATE_ACTION_48H.length)
+      p.push(`${T.action}: ${sections.IMMEDIATE_ACTION_48H.join('. ')}.`);
+    if (sections.CHEMICAL_TREATMENT)  p.push(`${T.chemical}: ${sections.CHEMICAL_TREATMENT}`);
+    if (sections.ORGANIC_ALTERNATIVE) p.push(`${T.organic}: ${sections.ORGANIC_ALTERNATIVE}`);
+    if (sections.FARMER_TIP)          p.push(`${T.tip}: ${sections.FARMER_TIP}`);
+    return p.join(' ').slice(0, 3000);
+  }
+
+  function _doSpeak(text) {
+    if (!window.speechSynthesis || !text) return;
+    window.speechSynthesis.cancel();
+    clearInterval(stallGuardRef.current);
+    // Map app language to BCP-47 prefixes and locale tags
+    const langPrefixMap = { hi: 'hi', ml: 'ml', en: 'en' };
+    const langLocaleMap = { hi: 'hi-IN', ml: 'ml-IN', en: 'en-US' };
+    const prefix = langPrefixMap[language] || 'en';
+    const locale = langLocaleMap[language] || 'en-US';
+    const go = (voices) => {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = locale;
+      // Prefer a local (offline) voice for the selected language, then any voice, then English fallback
+      const voice = voices.find(v => v.lang.startsWith(prefix) && v.localService)
+                 || voices.find(v => v.lang.startsWith(prefix))
+                 || voices.find(v => v.lang.startsWith('en') && v.localService)
+                 || voices.find(v => v.lang.startsWith('en'));
+      if (voice) utter.voice = voice;
+      utter.rate = 0.88;
+      utter.volume = 1;
+      utter.onstart = () => setIsSpeaking(true);
+      utter.onend   = () => { setIsSpeaking(false); clearInterval(stallGuardRef.current); };
+      utter.onerror = () => { setIsSpeaking(false); clearInterval(stallGuardRef.current); };
+      window.speechSynthesis.resume();
+      window.speechSynthesis.speak(utter);
+      stallGuardRef.current = setInterval(() => {
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+      }, 10000);
+    };
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) { go(voices); }
+    else { window.speechSynthesis.addEventListener('voiceschanged', () => go(window.speechSynthesis.getVoices()), { once: true }); }
+  }
+
+  function stopSpeaking() {
+    window.speechSynthesis?.cancel();
+    clearInterval(stallGuardRef.current);
+    setIsSpeaking(false);
+  }
+
+  // Keep ref up-to-date every render so the effect always calls the latest version
+  speakFnRef.current = () => _doSpeak(_buildScript());
 
   return (
     <>
@@ -314,11 +398,40 @@ export default function DiseaseResultCard({
             fontFamily: "'Courier New', monospace", fontSize: 9, fontWeight: 700,
             letterSpacing: "0.14em", color: "#9ca3af", textTransform: "uppercase",
           }}>{T.report}</span>
-          <span style={{
-            fontFamily: "'Courier New', monospace", fontSize: 9, color: "#d1d5db",
-          }}>
-            {new Date().toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{
+              fontFamily: "'Courier New', monospace", fontSize: 9, color: "#d1d5db",
+            }}>
+              {new Date().toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}
+            </span>
+            {/* TTS play/stop button */}
+            <button
+              onClick={() => isSpeaking ? stopSpeaking() : speakFnRef.current?.()}
+              title={isSpeaking ? "Stop reading" : "Read report aloud"}
+              style={{
+                background: "none", border: "none", cursor: "pointer", padding: "2px 4px",
+                display: "flex", alignItems: "center",
+                color: isSpeaking ? sev.color : "#9ca3af",
+                transition: "color 0.2s",
+              }}
+            >
+              {isSpeaking ? (
+                /* Currently playing → show speaker-with-waves (active state) */
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                </svg>
+              ) : (
+                /* Not playing → show muted/off speaker (click to start) */
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                  <line x1="23" y1="9" x2="17" y2="15"/>
+                  <line x1="17" y1="9" x2="23" y2="15"/>
+                </svg>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* ── Main body ── */}

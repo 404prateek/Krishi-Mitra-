@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useLanguage } from "../context/LanguageContext";
 import { SCHEMES } from "../data/schemes";
+import { schemeService } from "../services/schemeService";
 import "../styles/SchemesPage.css";
 
 const ALL_STATES = [
@@ -25,17 +26,47 @@ export default function SchemesPage() {
   const [stateFilter, setStateFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [schemes, setSchemes] = useState(SCHEMES);
+  const [loading, setLoading] = useState(true);
 
-  const filtered = SCHEMES.filter(s => {
-    const matchState = stateFilter === 'all' ||
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadSchemes() {
+      setLoading(true);
+      try {
+        const data = await schemeService.getSchemes();
+        if (mounted) {
+          setSchemes(Array.isArray(data) ? data : SCHEMES);
+        }
+      } catch (error) {
+        if (mounted) {
+          setSchemes(SCHEMES);
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadSchemes();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const filtered = schemes.filter(s => {
+    const stateMatch = stateFilter === 'all' ||
       s.states === 'all' ||
-      s.states.includes(stateFilter);
-    const matchCat = categoryFilter === 'all' || s.category === categoryFilter;
-    const matchSearch = !search ||
+      (Array.isArray(s.states) ? s.states.includes(stateFilter) : false);
+    const categoryMatch = categoryFilter === 'all' || s.category === categoryFilter;
+    const searchMatch = !search ||
       s.title.toLowerCase().includes(search.toLowerCase()) ||
-      s.tags.some(tag => tag.toLowerCase().includes(search.toLowerCase())) ||
-      s.fullName.toLowerCase().includes(search.toLowerCase());
-    return matchState && matchCat && matchSearch;
+      (Array.isArray(s.tags) && s.tags.some(tag => tag.toLowerCase().includes(search.toLowerCase()))) ||
+      (s.fullName || '').toLowerCase().includes(search.toLowerCase());
+    return stateMatch && categoryMatch && searchMatch;
   });
 
   return (
@@ -90,6 +121,7 @@ export default function SchemesPage() {
 
       <div style={{ marginBottom: '20px' }}>
         <strong>{filtered.length}</strong> scheme(s) found
+        {loading && <span style={{ marginLeft: '8px', color: '#4b5563' }}>Loading latest schemes…</span>}
       </div>
 
       <section className="schemes-grid">

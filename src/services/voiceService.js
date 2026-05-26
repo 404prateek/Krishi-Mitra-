@@ -1,3 +1,5 @@
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+
 class VoiceService {
   constructor() {
     this.synthesis = window.speechSynthesis
@@ -107,6 +109,33 @@ class VoiceService {
         voice.lang.toLowerCase().startsWith(lang.toLowerCase())
       )
     )
+  }
+
+  async transcribeAudio(audioBlob, language = 'en') {
+    if (!audioBlob) {
+      throw new Error('No audio data supplied')
+    }
+
+    const mimeType = audioBlob.type || 'audio/webm'
+    const fileName = `voice-${Date.now()}.webm`
+    const file = new File([audioBlob], fileName, { type: mimeType })
+
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('language', language)
+
+    const response = await fetch(`${API_URL}/api/transcribe`, {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(errorData.detail || `Transcription failed (${response.status})`)
+    }
+
+    const data = await response.json()
+    return data.text || ''
   }
 }
 

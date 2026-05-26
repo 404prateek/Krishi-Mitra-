@@ -79,14 +79,26 @@ const Features = () => {
               onMouseOver={e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,0.1)"; }}
               onMouseOut={e => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04)"; }}
             >
-              {/* Icon */}
-              <div style={{
-                width: "52px", height: "52px", borderRadius: "14px",
-                background: f.accent + "18",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: "26px",
-              }}>
-                {f.emoji}
+              {/* Icon + optional live badge */}
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+                <div style={{
+                  width: "52px", height: "52px", borderRadius: "14px",
+                  background: f.accent + "18",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: "26px",
+                }}>
+                  {f.emoji}
+                </div>
+                {f.badge && (
+                  <span style={{
+                    fontSize: "11px", fontWeight: "700", color: "#059669",
+                    background: "#d1fae5", borderRadius: "20px", padding: "3px 9px",
+                    border: "1px solid #a7f3d0", display: "flex", alignItems: "center", gap: "4px",
+                  }}>
+                    <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10b981", display: "inline-block", animation: "pulse 1.5s infinite" }} />
+                    {f.badge}
+                  </span>
+                )}
               </div>
 
               <div>

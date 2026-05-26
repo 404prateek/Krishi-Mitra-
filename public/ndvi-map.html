@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KrishiMitra – 🛰️ UP Satellite NDVI Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Noto+Sans+Devanagari:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<style>
+:root{
+  --g1:#030d06;--g2:#0d2715;--g3:#1a8c47;--g4:#2ec16a;--g5:#6fffa0;
+  --gold:#f5c842;--red:#ff4444;--amber:#ff8c00;
+  --glass:rgba(255,255,255,0.06);--gborder:rgba(110,255,160,0.15);
+  --text:#e8ffe8;--muted:#7daa8f;--panel:rgba(3,13,6,0.95);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden;font-family:'Noto Sans Devanagari','Baloo 2',sans-serif;background:var(--g1);color:var(--text)}
+
+#topbar{
+  position:fixed;top:0;left:0;right:0;z-index:2000;height:54px;
+  display:flex;align-items:center;gap:10px;padding:0 16px;
+  background:rgba(3,13,6,0.97);border-bottom:1px solid var(--gborder);
+  backdrop-filter:blur(24px);
+}
+.logo{font-family:'Baloo 2';font-size:1.25rem;font-weight:800;color:var(--g4);
+  text-shadow:0 0 16px rgba(46,193,106,0.5);white-space:nowrap;display:flex;align-items:center;gap:6px}
+.tsep{width:1px;height:26px;background:var(--gborder);flex-shrink:0}
+.tab-btn{padding:5px 13px;border-radius:18px;border:1px solid transparent;
+  background:none;color:var(--muted);cursor:pointer;font-family:inherit;font-size:.78rem;font-weight:600;transition:all .22s;white-space:nowrap}
+.tab-btn.active,.tab-btn:hover{background:rgba(46,193,106,.12);border-color:var(--gborder);color:var(--g5)}
+.live-pill{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:.7rem;color:var(--g4);
+  border:1px solid var(--gborder);border-radius:18px;padding:4px 11px;background:rgba(46,193,106,.07);white-space:nowrap;flex-shrink:0}
+.pulse{width:6px;height:6px;background:var(--g4);border-radius:50%;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.6)}}
+
+#wrap{position:fixed;top:54px;left:0;right:0;bottom:0;display:flex}
+
+/* SIDEBAR */
+#sidebar{
+  width:290px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--gborder);
+  display:flex;flex-direction:column;overflow:hidden;z-index:100;
+}
+#sbInner{flex:1;overflow-y:auto;padding:14px;scrollbar-width:thin;scrollbar-color:rgba(46,193,106,.2) transparent}
+.sl{font-size:.62rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);
+  margin-bottom:8px;display:flex;align-items:center;gap:5px}
+.sl i{color:var(--g4)}
+.ssec{margin-bottom:18px}
+
+/* SEARCH */
+.search-wrap{position:relative;margin-bottom:10px}
+.search-inp{width:100%;padding:8px 34px 8px 11px;border-radius:9px;
+  background:rgba(255,255,255,.05);border:1px solid var(--gborder);
+  color:var(--text);font-family:inherit;font-size:.78rem;outline:none;transition:border-color .3s}
+.search-inp:focus{border-color:var(--g4)}
+.search-inp::placeholder{color:var(--muted)}
+.search-ico{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:.8rem;pointer-events:none}
+
+/* LAYER BTNS */
+.layer-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.lbtn{padding:7px 5px;border-radius:8px;border:1px solid var(--gborder);background:var(--glass);
+  color:var(--muted);cursor:pointer;font-family:inherit;font-size:.72rem;font-weight:600;
+  text-align:center;transition:all .22s}
+.lbtn.active,.lbtn:hover{background:rgba(46,193,106,.15);border-color:var(--g4);color:var(--g5)}
+
+/* STATS CARDS */
+.stats-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px}
+.stat-card{background:var(--glass);border:1px solid var(--gborder);border-radius:10px;padding:10px;text-align:center}
+.stat-val{font-family:'Baloo 2';font-size:1.2rem;font-weight:800;color:var(--g4);display:block}
+.stat-lbl{font-size:.62rem;color:var(--muted)}
+
+/* FIELD LIST */
+.fi{display:flex;align-items:center;gap:7px;padding:8px 9px;border-radius:9px;
+  background:var(--glass);border:1px solid var(--gborder);margin-bottom:5px;cursor:pointer;transition:all .18s}
+.fi:hover{border-color:var(--g4);background:rgba(46,193,106,.08)}
+.fi.active-field{border-color:var(--g4);background:rgba(46,193,106,.12)}
+.fdot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.finfo{flex:1;min-width:0}
+.fname{font-size:.78rem;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fmeta{font-size:.65rem;color:var(--muted)}
+.fbadge{font-size:.68rem;font-weight:700;padding:2px 6px;border-radius:7px;white-space:nowrap;flex-shrink:0}
+
+/* NDVI SCALE */
+.ndvi-scale{height:10px;border-radius:5px;
+  background:linear-gradient(90deg,#8B0000,#ff2222,#ff8c00,#f5c842,#90ee90,#2ec16a,#006400);
+  margin:5px 0}
+.ndvi-ticks{display:flex;justify-content:space-between;font-size:.6rem;color:var(--muted)}
+
+/* WEATHER */
+.wx-row{display:flex;gap:6px}
+.wx-c{flex:1;background:var(--glass);border:1px solid var(--gborder);border-radius:9px;padding:7px;text-align:center}
+.wx-ico{font-size:1.1rem;display:block;margin-bottom:2px}
+.wx-v{font-size:.85rem;font-weight:700;color:var(--g5)}
+.wx-d{font-size:.6rem;color:var(--muted)}
+
+/* ALERT */
+.alrt{display:flex;gap:7px;align-items:flex-start;padding:8px 9px;
+  border-radius:9px;margin-bottom:5px;font-size:.73rem;line-height:1.5}
+.alrt.warn{background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2)}
+.alrt.danger{background:rgba(255,68,68,.06);border:1px solid rgba(255,68,68,.2)}
+.alrt.info{background:rgba(46,193,106,.06);border:1px solid rgba(46,193,106,.18)}
+.alrt i{flex-shrink:0;margin-top:2px;font-size:.82rem}
+.alrt.warn i{color:var(--gold)}.alrt.danger i{color:var(--red)}.alrt.info i{color:var(--g4)}
+
+/* MAP */
+#map{flex:1;position:relative}
+#mapEl{width:100%;height:100%}
+
+/* MAP CONTROLS */
+#mc{position:absolute;top:12px;right:12px;z-index:500;display:flex;flex-direction:column;gap:5px}
+.mc-b{width:36px;height:36px;border-radius:9px;background:var(--panel);border:1px solid var(--gborder);
+  backdrop-filter:blur(14px);color:var(--g4);font-size:.85rem;cursor:pointer;transition:all .2s;
+  display:flex;align-items:center;justify-content:center}
+.mc-b:hover{background:rgba(46,193,106,.15);border-color:var(--g4)}
+
+/* HOVER TOOLTIP - the star feature */
+#hoverCard{
+  position:absolute;z-index:1000;pointer-events:none;
+  background:rgba(3,13,6,0.97);border:1px solid var(--g4);
+  border-radius:16px;padding:0;min-width:240px;max-width:280px;
+  box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 1px rgba(46,193,106,.1);
+  display:none;backdrop-filter:blur(20px);overflow:hidden;
+  transition:opacity .15s;
+}
+.hc-header{padding:12px 14px 10px;border-bottom:1px solid rgba(110,255,160,.1)}
+.hc-title{font-size:.9rem;font-weight:700;color:var(--g5);display:flex;align-items:center;gap:6px}
+.hc-sub{font-size:.7rem;color:var(--muted);margin-top:2px}
+.hc-body{padding:12px 14px}
+.hc-ndvi-bar{height:8px;border-radius:4px;background:rgba(255,255,255,.06);margin:8px 0 4px;overflow:hidden}
+.hc-ndvi-fill{height:100%;border-radius:4px;transition:width .5s ease}
+.hc-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;
+  border-bottom:1px solid rgba(110,255,160,.05);font-size:.75rem}
+.hc-row:last-child{border:none}
+.hc-key{color:var(--muted)}
+.hc-val{font-weight:600;color:var(--text)}
+.hc-advice{margin-top:10px;padding:8px 10px;background:rgba(46,193,106,.07);
+  border-radius:9px;font-size:.72rem;line-height:1.6;color:#c8f0d8;border:1px solid rgba(46,193,106,.12)}
+.hc-footer{padding:8px 14px;background:rgba(0,0,0,.2);border-top:1px solid rgba(110,255,160,.07);
+  font-size:.65rem;color:var(--muted);display:flex;align-items:center;gap:5px}
+
+/* STATUS BAR */
+#statusBar{
+  position:absolute;bottom:0;left:0;right:0;z-index:500;
+  padding:8px 14px;background:rgba(3,13,6,.92);border-top:1px solid var(--gborder);
+  backdrop-filter:blur(14px);display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+}
+.sb-i{display:flex;flex-direction:column;align-items:center;min-width:55px}
+.sb-v{font-family:'Baloo 2';font-size:.95rem;font-weight:800;color:var(--g4)}
+.sb-l{font-size:.6rem;color:var(--muted);white-space:nowrap}
+.sb-sep{width:1px;height:24px;background:var(--gborder)}
+
+/* LEGEND */
+#legend{position:absolute;bottom:52px;right:12px;z-index:500;
+  background:var(--panel);border:1px solid var(--gborder);border-radius:11px;
+  padding:11px 13px;backdrop-filter:blur(14px);min-width:130px}
+.leg-t{font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.leg-r{display:flex;align-items:center;gap:7px;font-size:.68rem;color:var(--text);margin-bottom:4px}
+.leg-s{width:13px;height:13px;border-radius:3px;flex-shrink:0}
+
+/* LOADER */
+#loader{position:absolute;inset:0;z-index:600;background:rgba(3,13,6,.85);
+  backdrop-filter:blur(8px);display:flex;flex-direction:column;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;transition:opacity .4s}
+#loader.show{opacity:1;pointer-events:all}
+.ring{width:52px;height:52px;border:3px solid rgba(46,193,106,.12);border-top-color:var(--g4);
+  border-radius:50%;animation:spin .75s linear infinite;margin-bottom:12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* DISTRICT LABEL */
+.dist-label{background:rgba(3,13,6,.8);color:#8dc8a0;border:1px solid rgba(110,255,160,.15);
+  padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap}
+
+/* Leaflet overrides */
+.leaflet-popup-content-wrapper{background:var(--panel);border:1px solid var(--gborder);
+  border-radius:14px;color:var(--text);backdrop-filter:blur(18px);box-shadow:0 8px 32px rgba(0,0,0,.6)}
+.leaflet-popup-tip{background:var(--panel)}
+.leaflet-control-zoom{border:1px solid var(--gborder)!important;border-radius:9px!important;overflow:hidden}
+.leaflet-control-zoom a{background:var(--panel)!important;color:var(--g4)!important;border-color:var(--gborder)!important}
+.leaflet-control-attribution{background:rgba(3,13,6,.8)!important;color:var(--muted)!important;font-size:.58rem!important}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(46,193,106,.2);border-radius:2px}
+
+@media(max-width:680px){#sidebar{display:none}}
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="logo"><span>🌾</span> KrishiMitra</div>
+  <div class="tsep"></div>
+  <button class="tab-btn" onclick="goHome()">🏠 होम</button>
+  <button class="tab-btn active">🛰️ UP NDVI Map</button>
+  <button class="tab-btn" onclick="startDraw()">✏️ खेत जोड़ें</button>
+  <div class="live-pill"><span class="pulse"></span>Live Sentinel-2</div>
+</div>
+
+<div id="wrap">
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div id="sbInner">
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-search"></i> खेत खोजें</div>
+        <div class="search-wrap">
+          <input class="search-inp" id="searchInp" placeholder="किसान नाम या ज़िला…" oninput="filterFields(this.value)">
+          <i class="fas fa-search search-ico"></i>
+        </div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-layer-group"></i> लेयर</div>
+        <div class="layer-grid">
+          <button class="lbtn active" id="lb-sat" onclick="switchLayer('sat')">🛰️ Satellite</button>
+          <button class="lbtn" id="lb-ndvi" onclick="switchLayer('ndvi')">🌿 NDVI</button>
+          <button class="lbtn" id="lb-ter" onclick="switchLayer('ter')">🗺️ Terrain</button>
+          <button class="lbtn" id="lb-osm" onclick="switchLayer('osm')">📍 OSM</button>
+        </div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-chart-bar"></i> UP सांख्यिकी</div>
+        <div class="stats-row">
+          <div class="stat-card"><span class="stat-val" id="stTotal">0</span><div class="stat-lbl">कुल खेत</div></div>
+          <div class="stat-card"><span class="stat-val" id="stAvgNdvi">—</span><div class="stat-lbl">औसत NDVI</div></div>
+          <div class="stat-card"><span class="stat-val" id="stHealthy">0</span><div class="stat-lbl">स्वस्थ खेत</div></div>
+          <div class="stat-card"><span class="stat-val" id="stCritical">0</span><div class="stat-lbl">खतरे में</div></div>
+        </div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-palette"></i> NDVI स्केल</div>
+        <div class="ndvi-scale"></div>
+        <div class="ndvi-ticks"><span>-1</span><span>0</span><span>0.3</span><span>0.6</span><span>1</span></div>
+        <div style="font-size:.64rem;color:var(--muted);margin-top:5px;line-height:1.6">
+          🔴 &lt;0.2 बंजर &nbsp;🟡 0.2–0.5 कमज़ोर &nbsp;🟢 0.5–0.8 ठीक &nbsp;💚 &gt;0.8 स्वस्थ
+        </div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-seedling"></i> खेत सूची <span id="fieldCountLbl" style="color:var(--g4);margin-left:4px"></span></div>
+        <div id="fieldList"></div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-cloud-sun"></i> मौसम – UP</div>
+        <div class="wx-row">
+          <div class="wx-c"><span class="wx-ico">🌡️</span><div class="wx-v" id="wxT">--</div><div class="wx-d">तापमान</div></div>
+          <div class="wx-c"><span class="wx-ico">💧</span><div class="wx-v" id="wxH">--</div><div class="wx-d">नमी</div></div>
+          <div class="wx-c"><span class="wx-ico">🌬️</span><div class="wx-v" id="wxW">--</div><div class="wx-d">हवा</div></div>
+        </div>
+      </div>
+
+      <div class="ssec">
+        <div class="sl"><i class="fas fa-bell"></i> अलर्ट</div>
+        <div class="alrt danger"><i class="fas fa-bug"></i><div>पश्चिमी UP में कपास पर सफेद मक्खी — छिड़काव जरूरी</div></div>
+        <div class="alrt warn"><i class="fas fa-cloud-rain"></i><div>48 घंटे में बारिश — सिंचाई स्थगित करें</div></div>
+        <div class="alrt info"><i class="fas fa-satellite-dish"></i><div>Sentinel-2 नई इमेज: आज 10:30 AM</div></div>
+      </div>
+
+    </div>
+    <div style="padding:8px 14px;border-top:1px solid var(--gborder);background:rgba(0,0,0,.3)">
+      <div style="font-size:.62rem;color:var(--muted);text-align:center;line-height:1.6">
+        🛰️ Sentinel-2 (ESA) + Landsat 8 (NASA)<br>via OpenWeatherMap Agro API
+      </div>
+    </div>
+  </div>
+
+  <!-- MAP -->
+  <div id="map">
+    <div id="mapEl"></div>
+
+    <!-- ZOOM WARNING -->
+    <div id="zoomWarn" style="display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:600;
+      background:rgba(245,200,66,0.95);color:#1a1a00;border-radius:10px;padding:7px 16px;
+      font-size:.78rem;font-weight:700;align-items:center;gap:7px;backdrop-filter:blur(10px);
+      border:1px solid rgba(245,200,66,0.5);box-shadow:0 4px 20px rgba(0,0,0,0.4);white-space:nowrap;">
+      ⚠️ बहुत ज़्यादा zoom — Satellite tiles उपलब्ध नहीं। थोड़ा zoom out करें।
+    </div>
+
+    <!-- HOVER CARD -->
+    <div id="hoverCard">
+      <div class="hc-header">
+        <div class="hc-title" id="hcTitle">—</div>
+        <div class="hc-sub" id="hcSub">—</div>
+      </div>
+      <div class="hc-body">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:.68rem;color:var(--muted)">NDVI</span>
+          <span style="font-size:.68rem;font-weight:700" id="hcNdviTxt">—</span>
+        </div>
+        <div class="hc-ndvi-bar"><div class="hc-ndvi-fill" id="hcNdviFill"></div></div>
+        <div class="hc-row"><span class="hc-key">फसल</span><span class="hc-val" id="hcCrop">—</span></div>
+        <div class="hc-row"><span class="hc-key">क्षेत्र</span><span class="hc-val" id="hcArea">—</span></div>
+        <div class="hc-row"><span class="hc-key">ज़िला</span><span class="hc-val" id="hcDist">—</span></div>
+        <div class="hc-row"><span class="hc-key">किसान</span><span class="hc-val" id="hcFarmer">—</span></div>
+        <div class="hc-row"><span class="hc-key">स्वास्थ्य</span><span class="hc-val" id="hcHealth">—</span></div>
+        <div class="hc-row"><span class="hc-key">अंतिम सिंचाई</span><span class="hc-val" id="hcWater">—</span></div>
+        <div class="hc-row"><span class="hc-key">उत्पादन अनुमान</span><span class="hc-val" id="hcYield">—</span></div>
+        <div class="hc-advice" id="hcAdvice">—</div>
+      </div>
+      <div class="hc-footer" id="hcFooter">
+        <i class="fas fa-satellite"></i> Sentinel-2 • <span id="hcDate">—</span>
+      </div>
+    </div>
+
+    <!-- MAP CONTROLS -->
+    <div id="mc">
+      <button class="mc-b" onclick="map.zoomIn()" title="+">+</button>
+      <button class="mc-b" onclick="map.zoomOut()" title="−">−</button>
+      <button class="mc-b" onclick="resetView()" title="UP"><i class="fas fa-home"></i></button>
+      <button class="mc-b" onclick="locateMe()" title="मेरी लोकेशन"><i class="fas fa-crosshairs"></i></button>
+      <button class="mc-b" onclick="fitAllFields()" title="सब खेत देखें"><i class="fas fa-expand"></i></button>
+    </div>
+
+    <!-- LEGEND -->
+    <div id="legend">
+      <div class="leg-t">NDVI स्वास्थ्य</div>
+      <div class="leg-r"><div class="leg-s" style="background:#2ec16a"></div>स्वस्थ (&gt;0.65)</div>
+      <div class="leg-r"><div class="leg-s" style="background:#90d040"></div>ठीक (0.45–0.65)</div>
+      <div class="leg-r"><div class="leg-s" style="background:#f5c842"></div>सामान्य (0.25–0.45)</div>
+      <div class="leg-r"><div class="leg-s" style="background:#ff8c00"></div>कमज़ोर (0.1–0.25)</div>
+      <div class="leg-r"><div class="leg-s" style="background:#ff2222"></div>बंजर (&lt;0.1)</div>
+    </div>
+
+    <!-- LOADER -->
+    <div id="loader">
+      <div class="ring"></div>
+      <div style="font-size:.82rem;color:var(--muted)" id="loaderMsg">Loading…</div>
+    </div>
+
+    <!-- STATUS BAR -->
+    <div id="statusBar">
+      <div class="sb-i"><div class="sb-v" id="sbLat">26.85°N</div><div class="sb-l">अक्षांश</div></div>
+      <div class="sb-sep"></div>
+      <div class="sb-i"><div class="sb-v" id="sbLng">80.90°E</div><div class="sb-l">देशांतर</div></div>
+      <div class="sb-sep"></div>
+      <div class="sb-i"><div class="sb-v" id="sbZoom">8</div><div class="sb-l">ज़ूम</div></div>
+      <div class="sb-sep"></div>
+      <div class="sb-i"><div class="sb-v" id="sbLyr">Satellite</div><div class="sb-l">लेयर</div></div>
+      <div class="sb-sep"></div>
+      <div class="sb-i"><div class="sb-v" id="sbHovered">—</div><div class="sb-l">hover खेत</div></div>
+      <div style="margin-left:auto;font-size:.68rem;color:var(--muted)">🛰️ Sentinel-2 • ESA Copernicus • UP Agriculture Monitor</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+// ══════════════════════════════════════════════════
+//  UP FIELDS DATA — 50 real district locations
+// ══════════════════════════════════════════════════
+const UP_DISTRICTS = [
+  'Lucknow','Agra','Varanasi','Kanpur','Prayagraj','Meerut','Gorakhpur',
+  'Aligarh','Bareilly','Moradabad','Saharanpur','Noida','Ghaziabad',
+  'Mathura','Firozabad','Jhansi','Bulandshahr','Muzaffarnagar','Hapur',
+  'Shamli','Bijnor','Amroha','Rampur','Sambhal','Budaun','Shahjahanpur',
+  'Lakhimpur','Sitapur','Hardoi','Unnao','Rae Bareli','Fatehpur',
+  'Sultanpur','Amethi','Faizabad','Gonda','Bahraich','Shravasti',
+  'Balrampur','Siddharthnagar','Basti','Sant Kabir Nagar','Deoria',
+  'Kushinagar','Maharajganj','Azamgarh','Mau','Ballia','Jaunpur','Mirzapur'
+];
+
+const CROPS = ['गेहूं','धान','गन्ना','आलू','टमाटर','मक्का','सरसों','कपास','मटर','प्याज','मिर्च','बाजरा'];
+const FARMERS = [
+  'रामलाल यादव','सुरेश सिंह','मोहन लाल','राधेश्याम','छोटेलाल','भगवान दास',
+  'रामप्रसाद','सीताराम','मुन्नालाल','हरिश्चंद्र','बद्रीनाथ','कमलेश कुमार',
+  'विजय शंकर','दीनदयाल','परमेश्वर दास','राम किशोर','शिव प्रसाद','गोपाल दास',
+  'जगदीश प्रसाद','नंद किशोर','ओम प्रकाश','सूरज भान','देवेंद्र कुमार','महेश नारायण'
+];
+
+// Seeded random for consistent data
+function seededRand(seed) {
+  let x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+// Generate 50+ field polygons covering UP
+function generateUPFields() {
+  const fields = [];
+  // UP bounding box: lat 23.8–30.4, lng 77.1–84.6
+  const upRegions = [
+    // Western UP
+    {lat:[28.2,30.4], lng:[77.1,79.0], district:['Meerut','Saharanpur','Muzaffarnagar','Shamli','Bijnor','Hapur','Bulandshahr','Aligarh','Moradabad','Amroha','Rampur','Sambhal']},
+    // Central UP
+    {lat:[26.0,28.2], lng:[79.0,81.5], district:['Kanpur','Lucknow','Unnao','Hardoi','Sitapur','Lakhimpur','Shahjahanpur','Bareilly','Budaun','Pilibhit','Fatehpur','Rae Bareli']},
+    // Eastern UP
+    {lat:[25.0,27.5], lng:[81.5,84.6], district:['Varanasi','Prayagraj','Gorakhpur','Jaunpur','Azamgarh','Mau','Ballia','Deoria','Kushinagar','Ghazipur','Basti','Sant Kabir Nagar']},
+    // Bundelkhand
+    {lat:[23.8,26.0], lng:[78.0,81.2], district:['Jhansi','Lalitpur','Mahoba','Banda','Chitrakoot','Hamirpur']},
+    // Terai
+    {lat:[27.5,29.5], lng:[81.0,83.5], district:['Bahraich','Shravasti','Gonda','Balrampur','Siddharthnagar','Maharajganj']}
+  ];
+
+  let idx = 0;
+  upRegions.forEach((region, ri) => {
+    const count = ri === 0 ? 12 : ri === 1 ? 13 : ri === 2 ? 13 : ri === 3 ? 6 : 8;
+    for(let i = 0; i < count; i++) {
+      const seed = ri * 100 + i;
+      const lat = region.lat[0] + seededRand(seed) * (region.lat[1] - region.lat[0]);
+      const lng = region.lng[0] + seededRand(seed+1) * (region.lng[1] - region.lng[0]);
+      const size = 0.012 + seededRand(seed+2) * 0.025; // field size
+      const aspect = 0.6 + seededRand(seed+3) * 0.8;
+      const dist = region.district[i % region.district.length];
+      const crop = CROPS[Math.floor(seededRand(seed+4) * CROPS.length)];
+      const farmer = FARMERS[Math.floor(seededRand(seed+5) * FARMERS.length)];
+      const ndvi = parseFloat((0.08 + seededRand(seed+6) * 0.82).toFixed(2));
+      const area = parseFloat((0.8 + seededRand(seed+7) * 8.2).toFixed(1));
+      const lastWater = Math.floor(seededRand(seed+8) * 14) + 1;
+      const yieldEst = Math.floor(20 + seededRand(seed+9) * 60) * 100;
+      const health = getHealth(ndvi);
+      // Polygon coords (rect with slight irregularity)
+      const coords = [
+        [lat, lng],
+        [lat + size * seededRand(seed+10)*0.1, lng + size],
+        [lat + size * aspect + seededRand(seed+11)*0.005, lng + size * seededRand(seed+12)*0.05],
+        [lat + size * aspect, lng],
+        [lat, lng]
+      ];
+      // Image dates (last 30 days)
+      const daysAgo = Math.floor(seededRand(seed+13) * 10) + 1;
+      const imgDate = new Date(Date.now() - daysAgo * 86400000);
+      const imgDateStr = imgDate.toLocaleDateString('hi-IN');
+      fields.push({
+        id: idx++, name: `खेत-${idx} (${dist})`, dist, crop, farmer,
+        ndvi, area, lastWater, yieldEst, health, coords, imgDateStr,
+        lat, lng,
+        p25: parseFloat((ndvi - 0.08).toFixed(2)),
+        p75: parseFloat((ndvi + 0.08).toFixed(2)),
+        std: parseFloat((0.03 + seededRand(seed+14)*0.12).toFixed(3))
+      });
+    }
+  });
+  return fields;
+}
+
+function getHealth(n) {
+  if(n>=0.65) return {label:'💚 स्वस्थ',color:'#2ec16a',short:'स्वस्थ'};
+  if(n>=0.45) return {label:'🟢 ठीक',color:'#90d040',short:'ठीक'};
+  if(n>=0.25) return {label:'🟡 सामान्य',color:'#f5c842',short:'सामान्य'};
+  if(n>=0.10) return {label:'🟠 कमज़ोर',color:'#ff8c00',short:'कमज़ोर'};
+  return {label:'🔴 बंजर',color:'#ff2222',short:'बंजर'};
+}
+
+function getAdvice(ndvi, crop) {
+  if(ndvi>=0.65) return `✅ ${crop} की फसल उत्कृष्ट स्थिति में है। नियमित निगरानी जारी रखें।`;
+  if(ndvi>=0.45) return `💧 ${crop} को हल्की सिंचाई और Urea spray (1%) करें — 7 दिन में सुधार होगा।`;
+  if(ndvi>=0.25) return `⚠️ ${crop} में पोषक तत्वों की कमी। NPK खाद + मिट्टी जांच तुरंत करें।`;
+  if(ndvi>=0.10) return `🚨 ${crop} गंभीर stress में है। कृषि विशेषज्ञ से मिलें। PM Fasal Bima claim करें।`;
+  return `❌ बंजर ज़मीन। Soil health card बनवाएं। Organic treatment की ज़रूरत है।`;
+}
+
+// ══════════════════════════════════════════════════
+//  MAP INIT
+// ══════════════════════════════════════════════════
+const map = L.map('mapEl',{center:[26.85,80.9],zoom:7,zoomControl:false,maxZoom:18});
+let tileLayer = null;
+const drawnItems = new L.FeatureGroup().addTo(map);
+
+const TILES = {
+  sat:{
+    url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attr:'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+    lbl:'Satellite', maxZoom:18, maxNativeZoom:17
+  },
+  osm:{
+    url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attr:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    lbl:'OSM', maxZoom:19, maxNativeZoom:19
+  },
+  ter:{
+    url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+    attr:'Map data: &copy; OpenStreetMap contributors, SRTM | Map display: &copy; OpenTopoMap',
+    lbl:'Terrain', maxZoom:17, maxNativeZoom:17
+  },
+  ndvi:{
+    url:'https://agromonitoring.com/tiles/ndvi/{z}/{x}/{y}?appid=6034cc54ab71d86ebb9342dd4b312e3d',
+    attr:'NDVI &copy; <a href="https://agromonitoring.com">AgroMonitoring</a> (OpenWeatherMap)',
+    lbl:'NDVI Live', maxZoom:14, maxNativeZoom:14
+  }
+};
+
+function setTile(key){
+  if(tileLayer) map.removeLayer(tileLayer);
+  const t=TILES[key];
+  tileLayer=L.tileLayer(t.url,{
+    attribution: t.attr,
+    maxZoom: t.maxZoom,
+    maxNativeZoom: t.maxNativeZoom,
+    errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  }).addTo(map);
+  tileLayer.setZIndex(1);
+  document.getElementById('sbLyr').textContent=t.lbl;
+}
+setTile('sat');
+
+// ══════════════════════════════════════════════════
+//  FIELDS
+// ══════════════════════════════════════════════════
+let ALL_FIELDS = generateUPFields();
+let fieldPolygons = []; // {field, poly}
+let hoveredFieldId = -1;
+const hoverCard = document.getElementById('hoverCard');
+const mapEl = document.getElementById('mapEl');
+
+function drawAllFields() {
+  fieldPolygons.forEach(fp => map.removeLayer(fp.poly));
+  fieldPolygons = [];
+
+  ALL_FIELDS.forEach(f => {
+    const poly = L.polygon(f.coords, {
+      color: f.health.color,
+      fillColor: f.health.color,
+      fillOpacity: 0.38,
+      weight: 1.5,
+      className: 'field-poly'
+    }).addTo(map);
+
+    poly.on('mouseover', (e) => { onFieldHover(e, f, poly); fetchAndUpdateHoverField(f, poly); });
+    poly.on('mousemove', (e) => moveCard(e.originalEvent));
+    poly.on('mouseout',  () => onFieldOut(f, poly));
+    poly.on('click',     () => flyToField(f, poly));
+
+    fieldPolygons.push({field:f, poly});
+  });
+
+  updateStats();
+  renderFieldList(ALL_FIELDS);
+}
+
+// ══════════════════════════════════════════════════
+//  HOVER LOGIC — the main feature
+// ══════════════════════════════════════════════════
+function onFieldHover(e, f, poly) {
+  hoveredFieldId = f.id;
+
+  // Highlight
+  poly.setStyle({fillOpacity:0.7, weight:2.5, color:'#ffffff'});
+  poly.bringToFront();
+
+  // Populate card
+  document.getElementById('hcTitle').innerHTML = `<span style="color:${f.health.color}">●</span> ${f.name}`;
+  document.getElementById('hcSub').textContent = `${f.dist} ज़िला • Sentinel-2`;
+  document.getElementById('hcCrop').textContent = f.crop;
+  document.getElementById('hcArea').textContent = f.area + ' हेक्टेयर';
+  document.getElementById('hcDist').textContent = f.dist;
+  document.getElementById('hcFarmer').textContent = f.farmer;
+  document.getElementById('hcHealth').innerHTML = `<span style="color:${f.health.color};font-weight:700">${f.health.label}</span>`;
+  document.getElementById('hcWater').textContent = f.lastWater + ' दिन पहले';
+  document.getElementById('hcYield').textContent = f.yieldEst.toLocaleString('hi-IN') + ' kg/हेक्टेयर';
+  document.getElementById('hcNdviTxt').textContent = f.ndvi + ' (P25:' + f.p25 + ' P75:' + f.p75 + ')';
+  document.getElementById('hcAdvice').textContent = getAdvice(f.ndvi, f.crop);
+  document.getElementById('hcDate').textContent = f.imgDateStr;
+
+  // NDVI bar
+  const fill = document.getElementById('hcNdviFill');
+  const pct = Math.max(0, Math.min(100, ((f.ndvi + 1) / 2) * 100));
+  fill.style.width = pct + '%';
+  fill.style.background = `linear-gradient(90deg, #ff2222, ${f.health.color})`;
+
+  // Show card
+  hoverCard.style.display = 'block';
+  moveCard(e.originalEvent);
+
+  // Status bar
+  document.getElementById('sbHovered').textContent = f.name.slice(0,12);
+
+  // Sidebar highlight
+  document.querySelectorAll('.fi').forEach(el => {
+    el.classList.toggle('active-field', parseInt(el.dataset.id) === f.id);
+    if(parseInt(el.dataset.id) === f.id) el.scrollIntoView({block:'nearest',behavior:'smooth'});
+  });
+}
+
+function moveCard(e) {
+  if(!e) return;
+  const rect = mapEl.getBoundingClientRect();
+  let x = e.clientX - rect.left + 16;
+  let y = e.clientY - rect.top - 20;
+  const cw = hoverCard.offsetWidth  || 280;
+  const ch = hoverCard.offsetHeight || 380;
+  // Flip left if near right edge
+  if(x + cw > rect.width  - 10) x = e.clientX - rect.left - cw - 16;
+  // Flip above cursor if near bottom edge (account for status bar ~52px)
+  if(y + ch > rect.height - 56) y = e.clientY - rect.top - ch - 10;
+  // Clamp: never let the card bleed above or left of the map area
+  y = Math.max(4, y);
+  x = Math.max(4, x);
+  hoverCard.style.left = x + 'px';
+  hoverCard.style.top  = y + 'px';
+}
+
+function onFieldOut(f, poly) {
+  hoveredFieldId = -1;
+  poly.setStyle({
+    fillOpacity: 0.38, weight: 1.5, color: f.health.color
+  });
+  hoverCard.style.display = 'none';
+  document.getElementById('sbHovered').textContent = '—';
+  document.querySelectorAll('.fi').forEach(el => el.classList.remove('active-field'));
+}
+
+map.on('mousemove', e => {
+  document.getElementById('sbLat').textContent = e.latlng.lat.toFixed(4)+'°N';
+  document.getElementById('sbLng').textContent = e.latlng.lng.toFixed(4)+'°E';
+});
+map.on('zoom', () => {
+  const z = map.getZoom();
+  document.getElementById('sbZoom').textContent = z;
+  // Warn if zoomed too much for satellite layer
+  const activeLayer = document.querySelector('.lbtn.active')?.id?.replace('lb-','') || 'sat';
+  const maxNative = TILES[activeLayer]?.maxNativeZoom || 17;
+  const warnEl = document.getElementById('zoomWarn');
+  if(warnEl) warnEl.style.display = (z > maxNative) ? 'flex' : 'none';
+});
+
+// ══════════════════════════════════════════════════
+//  STATS
+// ══════════════════════════════════════════════════
+function updateStats() {
+  const fields = ALL_FIELDS;
+  document.getElementById('stTotal').textContent = fields.length;
+  const avg = (fields.reduce((s,f)=>s+f.ndvi,0)/fields.length).toFixed(2);
+  document.getElementById('stAvgNdvi').textContent = avg;
+  document.getElementById('stHealthy').textContent = fields.filter(f=>f.ndvi>=0.55).length;
+  document.getElementById('stCritical').textContent = fields.filter(f=>f.ndvi<0.2).length;
+  document.getElementById('stTotal').textContent = fields.length;
+  document.getElementById('fieldCountLbl').textContent = '(' + fields.length + ')';
+}
+
+// ══════════════════════════════════════════════════
+//  FIELD LIST SIDEBAR
+// ══════════════════════════════════════════════════
+function renderFieldList(fields) {
+  const el = document.getElementById('fieldList');
+  el.innerHTML = fields.map(f => `
+    <div class="fi" data-id="${f.id}" onclick="flyToField(ALL_FIELDS[${f.id}])">
+      <div class="fdot" style="background:${f.health.color}"></div>
+      <div class="finfo">
+        <div class="fname">${f.farmer}</div>
+        <div class="fmeta">${f.dist} • ${f.crop}</div>
+      </div>
+      <span class="fbadge" style="background:${f.health.color}22;color:${f.health.color};border:1px solid ${f.health.color}44">${f.ndvi}</span>
+    </div>
+  `).join('');
+}
+
+function filterFields(q) {
+  const filtered = ALL_FIELDS.filter(f =>
+    f.farmer.includes(q) || f.dist.toLowerCase().includes(q.toLowerCase()) ||
+    f.crop.includes(q) || f.name.includes(q)
+  );
+  renderFieldList(filtered);
+}
+
+// ══════════════════════════════════════════════════
+//  LAYER SWITCHER
+// ══════════════════════════════════════════════════
+function switchLayer(k) {
+  document.querySelectorAll('.lbtn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('lb-'+k).classList.add('active');
+  setTile(k);
+  if(k==='ndvi') {
+    // Show live NDVI tile layer + coloured polygon overlay
+    fieldPolygons.forEach(fp => fp.poly.setStyle({fillOpacity:0.45,weight:1}));
+  } else {
+    fieldPolygons.forEach(fp => fp.poly.setStyle({fillOpacity:0.38,weight:1.5,color:fp.field.health.color}));
+  }
+}
+
+// ══════════════════════════════════════════════════
+//  MAP CONTROLS
+// ══════════════════════════════════════════════════
+function resetView(){map.flyTo([26.85,80.9],7,{duration:1.2})}
+function fitAllFields(){
+  if(fieldPolygons.length===0) return;
+  const group = L.featureGroup(fieldPolygons.map(fp=>fp.poly));
+  map.flyToBounds(group.getBounds(),{padding:[30,30],duration:1.5});
+}
+function flyToField(f, poly){
+  const bounds = poly ? poly.getBounds() : fieldPolygons.find(fp=>fp.field.id===f.id)?.poly.getBounds();
+  if(bounds) map.flyToBounds(bounds,{padding:[80,80],duration:1,maxZoom:14});
+}
+function locateMe(){
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      map.flyTo([p.coords.latitude,p.coords.longitude],13,{duration:1.5});
+      L.circleMarker([p.coords.latitude,p.coords.longitude],
+        {radius:8,color:'#6fffa0',fillColor:'#2ec16a',fillOpacity:.8,weight:2})
+        .addTo(map).bindPopup('📍 आपकी लोकेशन').openPopup();
+    },
+    err => alert('लोकेशन नहीं मिली: '+err.message)
+  );
+}
+
+// ══════════════════════════════════════════════════
+//  DRAW NEW FIELD
+// ══════════════════════════════════════════════════
+const drawControl = new L.Control.Draw({
+  edit:{featureGroup:drawnItems,remove:true},
+  draw:{
+    polygon:{shapeOptions:{color:'#2ec16a',fillColor:'#2ec16a',fillOpacity:.25,weight:2,dashArray:'6,4'}},
+    rectangle:{shapeOptions:{color:'#2ec16a',fillColor:'#2ec16a',fillOpacity:.25,weight:2}},
+    marker:false,circle:false,circlemarker:false,polyline:false
+  }
+});
+
+function startDraw(){
+  if(!map.hasLayer(drawControl._container)) map.addControl(drawControl);
+  new L.Draw.Polygon(map,drawControl.options.draw.polygon).enable();
+}
+
+map.on(L.Draw.Event.CREATED, e => {
+  const layer = e.layer;
+  drawnItems.addLayer(layer);
+  const coords = layer.getLatLngs()[0].map(ll=>[ll.lat,ll.lng]);
+  const ndvi = parseFloat((Math.random()*0.7+0.15).toFixed(2));
+  const health = getHealth(ndvi);
+  const newField = {
+    id: ALL_FIELDS.length,
+    name: `नया खेत-${ALL_FIELDS.length+1}`,
+    dist: 'नया', crop: 'गेहूं',
+    farmer: 'आप', ndvi, area: '?',
+    lastWater: 0, yieldEst: 0,
+    health, coords, imgDateStr: 'आज',
+    lat: coords[0][0], lng: coords[0][1],
+    p25:(ndvi-0.08).toFixed(2), p75:(ndvi+0.08).toFixed(2), std:'0.05'
+  };
+  layer.setStyle({color:health.color,fillColor:health.color,fillOpacity:.38,weight:1.5});
+  layer.on('mouseover',e=>onFieldHover(e,newField,layer));
+  layer.on('mousemove',e=>moveCard(e.originalEvent));
+  layer.on('mouseout',()=>onFieldOut(newField,layer));
+  ALL_FIELDS.push(newField);
+  fieldPolygons.push({field:newField,poly:layer});
+  updateStats();
+  renderFieldList(ALL_FIELDS);
+  map.flyToBounds(layer.getBounds(),{padding:[60,60],duration:1});
+});
+
+// ══════════════════════════════════════════════════
+//  AGROMONITORING API KEY
+// ══════════════════════════════════════════════════
+const AGRO_KEY = '6034cc54ab71d86ebb9342dd4b312e3d';
+
+// ══════════════════════════════════════════════════
+//  WEATHER
+// ══════════════════════════════════════════════════
+async function fetchWeather(){
+  try{
+    const r = await fetch('https://api.open-meteo.com/v1/forecast?latitude=26.85&longitude=80.9&current=temperature_2m,relative_humidity_2m,wind_speed_10m&wind_speed_unit=kmh');
+    const d = await r.json();
+    document.getElementById('wxT').textContent = Math.round(d.current.temperature_2m)+'°C';
+    document.getElementById('wxH').textContent = d.current.relative_humidity_2m+'%';
+    document.getElementById('wxW').textContent = Math.round(d.current.wind_speed_10m)+' km/h';
+  }catch{
+    document.getElementById('wxT').textContent='34°C';
+    document.getElementById('wxH').textContent='65%';
+    document.getElementById('wxW').textContent='12 km/h';
+  }
+}
+
+// ══════════════════════════════════════════════════
+//  LIVE NDVI — AgroMonitoring API
+// ══════════════════════════════════════════════════
+const agroPolygonCache = {};
+
+async function fetchLiveNdvi(field) {
+  if(agroPolygonCache[field.id] && agroPolygonCache[field.id].fetched) {
+    return agroPolygonCache[field.id].ndvi;
+  }
+  try {
+    const geoJson = {
+      name: 'km_' + field.id,
+      geo_json: {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [field.coords.map(c => [c[1], c[0]])]
+        }
+      }
+    };
+    const createResp = await fetch(
+      `https://agromonitoring.com/agromonitoring/v1/polygons?appid=${AGRO_KEY}`,
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(geoJson)}
+    );
+    if(!createResp.ok) throw new Error('create ' + createResp.status);
+    const poly = await createResp.json();
+    const polyId = poly.id;
+
+    const now = Math.floor(Date.now()/1000);
+    const past = now - 30*86400;
+    const ndviResp = await fetch(
+      `https://agromonitoring.com/agromonitoring/v1/ndvi/history?polyid=${polyId}&appid=${AGRO_KEY}&from=${past}&to=${now}`
+    );
+    if(!ndviResp.ok) throw new Error('ndvi ' + ndviResp.status);
+    const ndviData = await ndviResp.json();
+
+    fetch(`https://agromonitoring.com/agromonitoring/v1/polygons/${polyId}?appid=${AGRO_KEY}`,{method:'DELETE'}).catch(()=>{});
+
+    if(ndviData && ndviData.length > 0) {
+      const latest = ndviData[ndviData.length - 1];
+      const liveNdvi = parseFloat((latest.data.mean).toFixed(2));
+      const imgDateStr = '🛰️ Live: ' + new Date(latest.dt * 1000).toLocaleDateString('hi-IN');
+      if(liveNdvi >= -1 && liveNdvi <= 1) {
+        field.ndvi = liveNdvi;
+        field.health = getHealth(liveNdvi);
+        field.p25 = parseFloat((liveNdvi - 0.05).toFixed(2));
+        field.p75 = parseFloat((liveNdvi + 0.05).toFixed(2));
+        field.imgDateStr = imgDateStr;
+        agroPolygonCache[field.id] = {fetched:true, ndvi:liveNdvi};
+        return liveNdvi;
+      }
+    }
+  } catch(e) {
+    console.warn('AgroAPI:', field.name, e.message);
+  }
+  agroPolygonCache[field.id] = {fetched:true, ndvi:field.ndvi};
+  return field.ndvi;
+}
+
+async function fetchLiveNdviBatch() {
+  const batch = ALL_FIELDS.slice(0, 5);
+  document.getElementById('loaderMsg').textContent = 'Live NDVI data fetch हो रहा है…';
+  for(const f of batch) {
+    await fetchLiveNdvi(f);
+    await new Promise(r => setTimeout(r, 500));
+  }
+  drawAllFields();
+  updateStats();
+  const alertEl = document.querySelector('.alrt.info div');
+  if(alertEl) alertEl.textContent = '✅ ' + batch.length + ' खेतों का Live Sentinel-2 NDVI load हुआ';
+}
+
+async function fetchAndUpdateHoverField(f, poly) {
+  if(agroPolygonCache[f.id]?.fetched) return;
+  await fetchLiveNdvi(f);
+  const fp = fieldPolygons.find(fp => fp.field.id === f.id);
+  if(fp) fp.poly.setStyle({color:f.health.color, fillColor:f.health.color});
+  if(hoveredFieldId === f.id) {
+    document.getElementById('hcNdviTxt').textContent = f.ndvi + ' 🛰️ Live';
+    document.getElementById('hcHealth').innerHTML = `<span style="color:${f.health.color};font-weight:700">${f.health.label}</span>`;
+    document.getElementById('hcAdvice').textContent = getAdvice(f.ndvi, f.crop);
+    document.getElementById('hcDate').textContent = f.imgDateStr;
+    const pct = Math.max(0, Math.min(100, ((f.ndvi+1)/2)*100));
+    const fill = document.getElementById('hcNdviFill');
+    fill.style.width = pct + '%';
+    fill.style.background = `linear-gradient(90deg,#ff2222,${f.health.color})`;
+  }
+}
+
+function goHome(){
+  // If loaded inside the React app iframe, navigate the parent; otherwise go to root
+  try { window.parent.location.href = '/'; } catch(e) { window.location.href = '/'; }
+}
+
+// ══════════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════════
+document.getElementById('loader').classList.add('show');
+document.getElementById('loaderMsg').textContent = 'UP के खेत load हो रहे हैं…';
+setTimeout(()=>{
+  drawAllFields();
+  document.getElementById('loader').classList.remove('show');
+  fetchWeather();
+  // Live NDVI fetch for first batch of fields
+  setTimeout(() => fetchLiveNdviBatch(), 1200);
+}, 800);
+</script>
+</body>
+</html>

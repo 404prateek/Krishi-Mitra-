@@ -21,8 +21,9 @@ import ChatPage from "./pages/ChatPage";
 import ProfilePage from "./pages/ProfilePage";
 import SchemesPage from "./pages/SchemesPage";
 import AdvisoriesPage from "./pages/AdvisoriesPage";
-import ContactPage from "./pages/ContactPage";
-
+import ContactPage from './pages/ContactPage';
+import NDVIMapPage from './pages/NDVIMapPage';
+import SMSAlertPage from './pages/SMSAlertPage';
 function AppContent() {
   const location = useLocation();
 
@@ -42,6 +43,8 @@ function AppContent() {
           <Route path="/schemes"        element={<SchemesPage />} />
           <Route path="/advisories"     element={<AdvisoriesPage />} />
           <Route path="/contact"        element={<ContactPage />} />
+          <Route path="/ndvi-map"       element={<NDVIMapPage />} />
+          <Route path="/sms-alerts"     element={<SMSAlertPage />} />
         </Routes>
       </main>
 

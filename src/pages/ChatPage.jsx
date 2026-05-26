@@ -56,6 +56,10 @@ const ChatPage = () => {
   const messagesEndRef = useRef(null)
   const fileInputRef   = useRef(null)
   const recognitionRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef = useRef([])
+  const audioStreamRef = useRef(null)
+  const autoStopTimerRef = useRef(null)
 
   const { scan, getFullAdvisory, reset: resetScan, result: scanResult, loading: scanLoading, error: scanError, stage: scanStage, STAGES } = useDiseaseScan()
 
@@ -64,6 +68,12 @@ const ChatPage = () => {
   useEffect(() => {
     setMessages([{ id:1, type:'bot', content:getWelcomeMessage(), timestamp:new Date().toLocaleTimeString() }])
   }, [currentLanguage])
+
+  useEffect(() => {
+    return () => {
+      stopCurrentVoiceCapture()
+    }
+  }, [])
 
   const handleSendMessage = async (overrideText) => {
     const text = (typeof overrideText === 'string' ? overrideText : inputText).trim()
@@ -110,21 +120,28 @@ const ChatPage = () => {
     await scan(file)
   }
 
-  const startVoiceRecognition = () => {
-    // ── Toggle: stop if already listening ──────────────────────────────────
-    if (isListening) {
+  const stopCurrentVoiceCapture = () => {
+    clearTimeout(autoStopTimerRef.current)
+    try {
+      mediaRecorderRef.current?.stop()
+    } catch {}
+    try {
       recognitionRef.current?.stop()
-      setIsListening(false)
-      return
+    } catch {}
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop())
+      audioStreamRef.current = null
     }
+    setIsListening(false)
+  }
 
+  const startBrowserVoiceRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
       setMicError('no-support')
       return
     }
 
-    // Request mic permission explicitly so we get a clear error
     navigator.mediaDevices?.getUserMedia({ audio: true })
       .then(() => {
         setMicError(null)
@@ -134,14 +151,12 @@ const ChatPage = () => {
         recognition.maxAlternatives = 1
         recognition.continuous = false
 
-        // ── Assign ALL handlers BEFORE start() — fixes the race condition ──
-        recognition.onstart  = () => setIsListening(true)
+        recognition.onstart = () => setIsListening(true)
 
         recognition.onresult = (event) => {
           const transcript = event.results[0][0].transcript
           setInputText(transcript)
           setIsListening(false)
-          // Small delay so React state flushes before we read it
           setTimeout(() => handleSendMessage(transcript), 300)
         }
 
@@ -160,11 +175,78 @@ const ChatPage = () => {
         }
 
         recognition.onend = () => setIsListening(false)
-
-        recognitionRef.current = recognition  // store ref BEFORE start()
+        recognitionRef.current = recognition
         recognition.start()
       })
       .catch(() => setMicError('not-allowed'))
+  }
+
+  const startWhisperRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      audioStreamRef.current = stream
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm'
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      mediaRecorderRef.current = recorder
+      audioChunksRef.current = []
+      setMicError(null)
+      setIsListening(true)
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      }
+
+      recorder.onstop = async () => {
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || mimeType || 'audio/webm' })
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach((track) => track.stop())
+          audioStreamRef.current = null
+        }
+        setIsListening(false)
+
+        try {
+          const transcript = await voiceService.transcribeAudio(blob, selectedLanguage)
+          if (transcript) {
+            setInputText(transcript)
+            await handleSendMessage(transcript)
+            return
+          }
+          setMicError('no-speech')
+          setTimeout(() => setMicError(null), 3000)
+        } catch (error) {
+          setMicError('network')
+          startBrowserVoiceRecognition()
+        }
+      }
+
+      recorder.start(250)
+      // Auto-stop after 8 s so the recording is sent without requiring a second tap
+      autoStopTimerRef.current = setTimeout(() => {
+        if (mediaRecorderRef.current?.state === 'recording') {
+          mediaRecorderRef.current.stop()
+        }
+      }, 8000)
+    } catch (error) {
+      setMicError('not-allowed')
+    }
+  }
+
+  const startVoiceRecognition = async () => {
+    if (isListening) {
+      stopCurrentVoiceCapture()
+      return
+    }
+
+    if (!('MediaRecorder' in window) || !navigator.mediaDevices?.getUserMedia) {
+      startBrowserVoiceRecognition()
+      return
+    }
+
+    await startWhisperRecording()
   }
 
   const handleKeyPress = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage() } }
@@ -172,29 +254,52 @@ const ChatPage = () => {
 
   const speakResponse = (text, lang) => {
     if (!window.speechSynthesis || !voiceEnabled || !text) return
-    const clean = text.replace(/[#*_`]/g,'').replace(/\n+/g,'. ').trim()
+    // Strip markdown; limit to 600 chars (Chrome silently drops very long utterances)
+    const clean = text.replace(/[#*_`]/g, '').replace(/\n+/g, '. ').trim().slice(0, 600)
+    if (!clean) return
 
-    // Chrome bug: cancel() then small delay before speaking — otherwise it stalls silently
     window.speechSynthesis.cancel()
-    setTimeout(() => {
+
+    const doSpeak = () => {
       const utterance = new SpeechSynthesisUtterance(clean)
-      utterance.lang  = LANG_CODES[lang || selectedLanguage] || 'hi-IN'
-      utterance.rate  = 0.85
-      utterance.pitch = 1
+      const targetLang = LANG_CODES[lang || selectedLanguage] || 'en-US'
+      utterance.lang   = targetLang
+      utterance.rate   = 0.88
+      utterance.pitch  = 1
       utterance.volume = 1
 
-      // Try to pick a matching installed voice
       const voices = window.speechSynthesis.getVoices()
-      const targetLang = LANG_CODES[lang || selectedLanguage] || 'hi-IN'
-      const match = voices.find(v => v.lang.toLowerCase().startsWith(targetLang.toLowerCase().slice(0,5)))
-        || voices.find(v => v.lang.toLowerCase().startsWith('en'))
-      if (match) utterance.voice = match
+      if (voices.length) {
+        const match = voices.find(v => v.lang.toLowerCase().startsWith(targetLang.toLowerCase().slice(0, 5)))
+          || voices.find(v => v.lang.toLowerCase().startsWith('en'))
+        if (match) utterance.voice = match
+      }
 
-      utterance.onstart = () => setIsSpeaking(true)
-      utterance.onend   = () => setIsSpeaking(false)
-      utterance.onerror = () => setIsSpeaking(false)
+      let stallGuard
+      utterance.onstart = () => {
+        setIsSpeaking(true)
+        // Chrome stall fix: pause+resume every 10 s to prevent synthesis from dying mid-speech
+        stallGuard = setInterval(() => {
+          if (!window.speechSynthesis.speaking) { clearInterval(stallGuard); return }
+          window.speechSynthesis.pause()
+          window.speechSynthesis.resume()
+        }, 10000)
+      }
+      utterance.onend   = () => { setIsSpeaking(false); clearInterval(stallGuard) }
+      utterance.onerror = ()  => { setIsSpeaking(false); clearInterval(stallGuard) }
+
+      // Chrome bug: synthesis stays paused after cancel() — must resume() before speak()
+      window.speechSynthesis.resume()
       window.speechSynthesis.speak(utterance)
-    }, 100)
+    }
+
+    // Chrome loads voices async — wait if the list is empty
+    if (window.speechSynthesis.getVoices().length === 0) {
+      window.speechSynthesis.addEventListener('voiceschanged', () => setTimeout(doSpeak, 50), { once: true })
+      setTimeout(doSpeak, 500) // fallback if event never fires
+    } else {
+      setTimeout(doSpeak, 80)
+    }
   }
 
   const speakMessage = (text, lang) => speakResponse(text, lang)
@@ -329,9 +434,10 @@ const ChatPage = () => {
                 border:"1px solid #fecaca", borderRadius:12,
                 fontSize:13, color:"#dc2626",
                 display:"flex", justifyContent:"space-between", alignItems:"center",
+                gap:12,
               }}>
-                <span>⚠️ AI is temporarily unavailable. Showing basic guidance.</span>
-                <button onClick={resetScan} style={{ fontSize:12, color:"#dc2626", background:"none", border:"none", cursor:"pointer", textDecoration:"underline" }}>Try again</button>
+                <span>⚠️ {scanError}</span>
+                <button onClick={resetScan} style={{ fontSize:12, color:"#dc2626", background:"none", border:"none", cursor:"pointer", textDecoration:"underline", whiteSpace:"nowrap" }}>Try again</button>
               </div>
             )}
 
@@ -454,7 +560,7 @@ const ChatPage = () => {
             <button
               className={`input-action-btn ${isListening ? 'listening' : ''}`}
               onClick={startVoiceRecognition}
-              title={isListening ? 'Listening…' : `Voice input (${selectedLanguage.toUpperCase()})`}
+              title={isListening ? 'Recording… tap to stop early' : `Voice input (${selectedLanguage.toUpperCase()})`}
               style={{ position:'relative' }}
             >
               {isListening && (

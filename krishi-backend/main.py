@@ -14,10 +14,11 @@ Run:
   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 
-import os, io, logging, time, asyncio
+import os, io, logging, time, asyncio, json, uuid, sqlite3
 from pathlib import Path
 from typing import Optional
 from collections import deque
+import urllib.request
 
 import httpx
 import numpy as np
@@ -25,7 +26,17 @@ from PIL import Image
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+from config_store import (
+    get_all_config,
+    get_api_key,
+    get_config_status,
+    init_db,
+    sync_env_to_db,
+    purge_stale_keys,
+)
 
 # ─── NEW SDK: google-genai (replaces deprecated google-generativeai) ──────────
 try:
@@ -38,16 +49,286 @@ except ImportError:
     logging.warning("google-genai not installed. AI features disabled. Run: pip install google-genai")
 
 load_dotenv()
+init_db()
+sync_env_to_db(dict(os.environ))
+purge_stale_keys()   # remove obsolete keys (e.g. WHISPER_*) left from older runs
 
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
-WEATHER_API_KEY  = os.getenv("WEATHER_API_KEY", "")
-AGMARKNET_KEY    = os.getenv("AGMARKNET_KEY", "")
-MODEL_PATH       = os.getenv("MODEL_PATH", "./model/krishi_model.h5")
-USE_MOCK_MODEL   = os.getenv("USE_MOCK_MODEL", "false").lower() == "true"
-ALLOWED_ORIGINS  = os.getenv(
+CONFIG = get_all_config()
+
+# ─── Scan History (SQLite + local image files) ────────────────────────────────
+_HISTORY_DB = Path(__file__).resolve().parent / "config.db"   # reuse same DB file
+_UPLOADS_DIR = Path(__file__).resolve().parent / "uploads"
+_UPLOADS_DIR.mkdir(exist_ok=True)
+
+def _history_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_HISTORY_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_history_db():
+    conn = _history_conn()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_history (
+                id            TEXT PRIMARY KEY,
+                image_path    TEXT NOT NULL,
+                disease       TEXT NOT NULL,
+                crop          TEXT NOT NULL,
+                confidence    REAL NOT NULL,
+                severity      TEXT NOT NULL,
+                is_healthy    INTEGER NOT NULL DEFAULT 0,
+                advisory_short  TEXT,
+                advisory_detail TEXT,
+                economic_impact TEXT,
+                created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+_init_history_db()
+
+def _save_scan(image_bytes: bytes, result: dict) -> str:
+    """Save image to disk and record metadata in DB. Returns the new scan ID."""
+    scan_id = str(uuid.uuid4())
+    img_path = _UPLOADS_DIR / f"{scan_id}.jpg"
+    # Re-encode as JPEG for consistent storage
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((800, 800))          # cap at 800px — saves disk space
+    img.save(img_path, "JPEG", quality=85)
+
+    conn = _history_conn()
+    try:
+        conn.execute("""
+            INSERT INTO scan_history
+              (id, image_path, disease, crop, confidence, severity,
+               is_healthy, advisory_short, advisory_detail, economic_impact)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            scan_id, str(img_path),
+            result.get("disease", ""),
+            result.get("crop", ""),
+            result.get("confidence", 0.0),
+            result.get("severity", "medium"),
+            1 if result.get("is_healthy") else 0,
+            result.get("advisory_short", ""),
+            result.get("advisory_detail", ""),
+            result.get("economic_impact", ""),
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+    return scan_id
+
+def _get_history(limit: int = 30) -> list[dict]:
+    conn = _history_conn()
+    try:
+        rows = conn.execute("""
+            SELECT id, disease, crop, confidence, severity, is_healthy,
+                   advisory_short, advisory_detail, economic_impact, created_at
+            FROM scan_history
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+GEMINI_API_KEY    = get_api_key("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+
+# ─── Gemini key pool: rotate across keys when one hits quota ─────────────────
+def _build_key_pool() -> list[str]:
+    """Collect all non-empty Gemini API keys in priority order."""
+    raw = [
+        GEMINI_API_KEY,
+        get_api_key("GEMINI_API_KEY_2") or os.getenv("GEMINI_API_KEY_2", ""),
+        get_api_key("GEMINI_API_KEY_3") or os.getenv("GEMINI_API_KEY_3", ""),
+        get_api_key("GEMINI_API_KEY_4") or os.getenv("GEMINI_API_KEY_4", ""),
+    ]
+    return [k.strip() for k in raw if k.strip()]
+
+GEMINI_KEY_POOL: list[str] = _build_key_pool()
+
+# Maps key → unix timestamp when it was marked exhausted. Resets after 1 hour.
+_key_exhausted_at: dict[str, float] = {}
+_KEY_COOLDOWN_SECS = 3600  # 1 hour — Gemini free-tier daily quota resets ~hourly
+
+def _key_available(key: str) -> bool:
+    """True if the key is not in the cooldown window."""
+    t = _key_exhausted_at.get(key)
+    if t is None:
+        return True
+    if time.time() - t >= _KEY_COOLDOWN_SECS:
+        del _key_exhausted_at[key]  # auto-recover after cooldown
+        return True
+    return False
+
+def _mark_key_exhausted(key: str):
+    _key_exhausted_at[key] = time.time()
+    remaining = sum(1 for k in GEMINI_KEY_POOL if _key_available(k))
+    log.warning(f"Key ...{key[-6:]} marked exhausted. Keys still available: {remaining}/{len(GEMINI_KEY_POOL)}")
+WEATHER_API_KEY   = get_api_key("WEATHER_API_KEY") or os.getenv("WEATHER_API_KEY", "")
+AGMARKNET_KEY     = get_api_key("AGMARKNET_KEY") or os.getenv("AGMARKNET_KEY", "")
+ELEVENLABS_API_KEY = get_api_key("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_STT_URL = get_api_key("ELEVENLABS_STT_URL") or os.getenv(
+    "ELEVENLABS_STT_URL",
+    "https://api.elevenlabs.io/v1/speech-to-text",
+)
+ELEVENLABS_STT_MODEL = get_api_key("ELEVENLABS_STT_MODEL") or os.getenv("ELEVENLABS_STT_MODEL", "scribe_v1")
+GOV_SCHEMES_URL   = get_api_key("GOV_SCHEMES_URL") or os.getenv("GOV_SCHEMES_URL", "")
+MODEL_PATH        = get_api_key("MODEL_PATH") or os.getenv("MODEL_PATH", "./model/krishi_model.h5")
+USE_MOCK_MODEL    = (get_api_key("USE_MOCK_MODEL") or os.getenv("USE_MOCK_MODEL", "false")).lower() == "true"
+# ResNet50 + XGBoost hybrid model (optional — set XGB_MODEL_PATH in .env to activate)
+XGB_MODEL_PATH    = os.getenv("XGB_MODEL_PATH", "")
+ALLOWED_ORIGINS   = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://localhost:3000"
 ).split(",")
+
+DEFAULT_SCHEMES = [
+    {
+        "id": "pm-kisan",
+        "title": "PM-KISAN",
+        "fullName": "Pradhan Mantri Kisan Samman Nidhi",
+        "category": "income",
+        "states": "all",
+        "crops": "all",
+        "benefit": "₹6,000/year direct transfer (₹2,000 every 4 months)",
+        "eligibility": "Land-owning farmer families with cultivable land",
+        "landLimit": None,
+        "documents": ["Aadhar Card", "Land Records (Khasra/Khatauni)", "Bank Account"],
+        "deadline": "Ongoing",
+        "link": "https://pmkisan.gov.in",
+        "tags": ["income support", "all farmers", "central scheme"],
+    },
+    {
+        "id": "pmfby",
+        "title": "PMFBY",
+        "fullName": "Pradhan Mantri Fasal Bima Yojana",
+        "category": "insurance",
+        "states": "all",
+        "crops": ["rice", "wheat", "cotton", "oilseeds", "pulses", "maize"],
+        "benefit": "Full crop insurance coverage against natural calamities",
+        "eligibility": "Farmers growing notified crops in notified areas",
+        "documents": ["Aadhar", "Land Records", "Bank Account", "Sowing Certificate"],
+        "deadline": "Before sowing season",
+        "link": "https://pmfby.gov.in",
+        "tags": ["insurance", "crop loss", "natural disaster"],
+    },
+    {
+        "id": "kcc",
+        "title": "Kisan Credit Card",
+        "fullName": "KCC - Kisan Credit Card Scheme",
+        "category": "credit",
+        "states": "all",
+        "crops": "all",
+        "benefit": "Credit up to ₹3 lakh at 4% interest (after 2% subvention)",
+        "eligibility": "All farmers, sharecroppers, tenant farmers",
+        "documents": ["Aadhar", "Land Records / Tenancy Agreement", "Passport Photo"],
+        "deadline": "Ongoing",
+        "link": "https://rbi.org.in",
+        "tags": ["credit", "loan", "low interest"],
+    },
+    {
+        "id": "pkvy",
+        "title": "PKVY",
+        "fullName": "Paramparagat Krishi Vikas Yojana",
+        "category": "organic",
+        "states": "all",
+        "crops": "all",
+        "benefit": "₹50,000/ha over 3 years for organic farming transition",
+        "eligibility": "Farmer groups (minimum 50 farmers, 50 acres) adopting organic",
+        "documents": ["Group Registration", "Land Records", "Bank Account"],
+        "deadline": "Seasonal",
+        "link": "https://agricoop.nic.in",
+        "tags": ["organic", "group farming", "subsidy"],
+    },
+    {
+        "id": "mgnregs-agri",
+        "title": "MGNREGS (Agriculture)",
+        "fullName": "Mahatma Gandhi NREGS - Agricultural Works",
+        "category": "employment",
+        "states": "all",
+        "crops": "all",
+        "benefit": "100 days guaranteed wage employment for farm-related work",
+        "eligibility": "Rural households with job cards",
+        "documents": ["Job Card", "Aadhar", "Bank Account"],
+        "deadline": "Ongoing",
+        "link": "https://nrega.nic.in",
+        "tags": ["employment", "rural", "wage"],
+    },
+    {
+        "id": "rkvy",
+        "title": "RKVY",
+        "fullName": "Rashtriya Krishi Vikas Yojana",
+        "category": "infrastructure",
+        "states": "all",
+        "crops": "all",
+        "benefit": "State-specific: farm infrastructure, machinery, storage",
+        "eligibility": "Farmers via state government projects",
+        "documents": ["State-specific"],
+        "deadline": "Varies by state",
+        "link": "https://rkvy.nic.in",
+        "tags": ["infrastructure", "machinery", "state scheme"],
+    },
+    {
+        "id": "maha-shetkari",
+        "title": "Shetkari Sanman Yojana",
+        "fullName": "Maharashtra Shetkari Sanman Yojana",
+        "category": "income",
+        "states": ["Maharashtra"],
+        "crops": "all",
+        "benefit": "₹12,000/year additional state support (on top of PM-KISAN)",
+        "eligibility": "Maharashtra farmers registered under PM-KISAN",
+        "documents": ["PM-KISAN registration", "Aadhar", "7/12 Extract"],
+        "deadline": "Ongoing",
+        "link": "https://krishi.maharashtra.gov.in",
+        "tags": ["Maharashtra", "income support", "state scheme"],
+    },
+    {
+        "id": "karnataka-ryothaseva",
+        "title": "Raitha Siri",
+        "fullName": "Karnataka Raitha Siri Yojane",
+        "category": "income",
+        "states": ["Karnataka"],
+        "crops": "all",
+        "benefit": "₹4,000/year state income support",
+        "eligibility": "Karnataka farmers with less than 5 acres land",
+        "documents": ["Aadhar", "RTC (Record of Rights)", "Bank Account"],
+        "deadline": "Ongoing",
+        "link": "https://raitamitra.karnataka.gov.in",
+        "tags": ["Karnataka", "income support", "small farmers"],
+    },
+    {
+        "id": "kalia-odisha",
+        "title": "KALIA",
+        "fullName": "Krushak Assistance for Livelihood and Income Augmentation",
+        "category": "income",
+        "states": ["Odisha"],
+        "crops": "all",
+        "benefit": "₹10,000/year + crop insurance + life insurance",
+        "eligibility": "Small and marginal farmers in Odisha",
+        "documents": ["Aadhar", "Land Records", "Bank Account"],
+        "deadline": "Ongoing",
+        "link": "https://kalia.odisha.gov.in",
+        "tags": ["Odisha", "income support", "insurance"],
+    },
+    {
+        "id": "rythu-bandhu",
+        "title": "Rythu Bandhu",
+        "fullName": "Telangana Rythu Bandhu Scheme",
+        "category": "income",
+        "states": ["Telangana"],
+        "crops": "all",
+        "benefit": "₹10,000/acre/year (₹5,000 per season)",
+        "eligibility": "Land-owning farmers in Telangana (not tenant farmers)",
+        "documents": ["Aadhar", "Pattadar Passbook / Land Records"],
+        "deadline": "Before each sowing season",
+        "link": "https://rythubandhu.telangana.gov.in",
+        "tags": ["Telangana", "investment support", "per acre"],
+    },
+]
 
 # ─── Model chain (fallback order when primary is overloaded) ─────────────────
 # gemini-2.0-flash is quota-exhausted on this project — excluded from chain
@@ -68,10 +349,10 @@ app.add_middleware(
 )
 
 # ─── Rate Limiter (global, in-memory) ─────────────────────────────────────────
-# Protects the free-tier Gemini quota (20 RPD / ~2 RPM on free tier)
+# Gemini 2.5 Flash free tier: 10 RPM, 500 RPD
 _rate_window   = deque()          # timestamps of recent AI calls
-RATE_LIMIT_RPM = 12               # max requests per minute (conservative)
-RATE_LIMIT_RPD = 18               # max requests per day (leave 2 buffer)
+RATE_LIMIT_RPM = 8                # safe below the 10 RPM free-tier ceiling
+RATE_LIMIT_RPD = 450              # safe below the 500 RPD free-tier ceiling
 _daily_count   = 0
 _daily_reset   = time.time()
 
@@ -155,9 +436,30 @@ def parse_class_name(raw: str) -> tuple[str, str, bool]:
     return crop, disease, healthy
 
 # ─── ML model ─────────────────────────────────────────────────────────────────
-_ml_model = None
+_ml_model    = None   # Keras / MobileNetV2 model (legacy path)
+_xgb_pred    = None   # ResNet50 + XGBoost predictor (activated via XGB_MODEL_PATH)
+
+def _get_xgb_predictor():
+    """Lazy-load ResNet50+XGBoost predictor. Returns None when not configured."""
+    global _xgb_pred
+    if _xgb_pred is not None:
+        return _xgb_pred
+    if not XGB_MODEL_PATH:
+        return None
+    xgb_file = Path(XGB_MODEL_PATH)
+    if not xgb_file.exists():
+        log.warning(f"XGB_MODEL_PATH set but file not found: {XGB_MODEL_PATH}")
+        return None
+    from resnet50_xgb_predictor import ResNetXGBPredictor
+    _xgb_pred = ResNetXGBPredictor()
+    scaler_path = str(xgb_file.parent / "xgb_scaler.pkl")
+    le_path     = str(xgb_file.parent / "xgb_label_encoder.pkl")
+    _xgb_pred.load(str(xgb_file), scaler_path, le_path)
+    log.info("ResNet50+XGBoost predictor loaded ✓")
+    return _xgb_pred
 
 def get_ml_model():
+    """Return Keras model (MobileNetV2). Used only when XGB predictor is absent."""
     global _ml_model
     if _ml_model is not None:
         return _ml_model
@@ -170,9 +472,9 @@ def get_ml_model():
             f"Model not found at {MODEL_PATH}. Set USE_MOCK_MODEL=true in .env for dev mode."
         )
     import tensorflow as tf
-    log.info(f"Loading ML model from {MODEL_PATH} …")
+    log.info(f"Loading MobileNetV2 model from {MODEL_PATH} …")
     _ml_model = tf.keras.models.load_model(MODEL_PATH)
-    log.info("Model loaded ✓")
+    log.info("MobileNetV2 model loaded ✓")
     return _ml_model
 
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
@@ -181,22 +483,88 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
     arr = np.array(img, dtype=np.float32) / 255.0
     return np.expand_dims(arr, axis=0)
 
+
+def validate_crop_image(image_bytes: bytes) -> tuple[bool, str]:
+    """Reject obvious non-crop uploads before running disease prediction."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = img.resize((224, 224))
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+
+    r = arr[..., 0]
+    g = arr[..., 1]
+    b = arr[..., 2]
+
+    max_rgb = np.maximum(np.maximum(r, g), b)
+    min_rgb = np.minimum(np.minimum(r, g), b)
+    delta = max_rgb - min_rgb
+
+    hue = np.zeros_like(max_rgb)
+    nonzero = delta > 1e-6
+    hue[nonzero & (max_rgb == r)] = ((g[nonzero & (max_rgb == r)] - b[nonzero & (max_rgb == r)]) / delta[nonzero & (max_rgb == r)]) % 6
+    hue[nonzero & (max_rgb == g)] = ((b[nonzero & (max_rgb == g)] - r[nonzero & (max_rgb == g)]) / delta[nonzero & (max_rgb == g)]) + 2
+    hue[nonzero & (max_rgb == b)] = ((r[nonzero & (max_rgb == b)] - g[nonzero & (max_rgb == b)]) / delta[nonzero & (max_rgb == b)]) + 4
+    hue = hue / 6.0
+
+    saturation = np.where(max_rgb == 0, 0.0, delta / max_rgb)
+    value = max_rgb
+
+    green_ratio = float(np.mean((hue >= 0.22) & (hue <= 0.45) & (saturation >= 0.18) & (value >= 0.12)))
+    saturation_mean = float(np.mean(saturation))
+    color_variance = float(np.var(arr))
+    colorfulness = float(np.std(np.abs(r - g)) + np.std(np.abs(r - b)) + np.std(np.abs(g - b)))
+
+    gray = np.mean(arr, axis=2)
+    gx = np.diff(gray, axis=1, append=gray[:, -1:])
+    gy = np.diff(gray, axis=0, append=gray[-1:, :])
+    edge_density = float(np.mean(np.sqrt(gx * gx + gy * gy) > 0.03))
+
+    # Reject flat, low-structure images that do not contain plant-like green cues.
+    if green_ratio < 0.02 and color_variance < 0.02 and edge_density < 0.01:
+        return False, "Please upload a crop or leaf image for disease detection."
+
+    # Reject strongly saturated non-green solids that do not show any leaf-like structure.
+    if green_ratio < 0.03 and saturation_mean > 0.55 and colorfulness < 0.10 and edge_density < 0.02:
+        return False, "Please upload a crop or leaf image for disease detection."
+
+    # Reject very weak plant-like images that are almost uniform and lack visible texture.
+    if green_ratio < 0.05 and color_variance < 0.01 and colorfulness < 0.05:
+        return False, "Please upload a crop or leaf image for disease detection."
+
+    return True, ""
+
+
 def predict_disease(image_bytes: bytes):
-    model = get_ml_model()
-    if model is None:
+    # ── 1. Mock mode ──────────────────────────────────────────────────────
+    if USE_MOCK_MODEL:
         idx        = np.random.randint(0, len(CLASS_NAMES))
         confidence = float(np.random.uniform(0.72, 0.98))
         raw_class  = CLASS_NAMES[idx]
         crop, disease, healthy = parse_class_name(raw_class)
         log.info(f"[MOCK] {raw_class} ({confidence:.1%})")
         return raw_class, confidence, crop, disease, healthy
+
+    # ── 2. ResNet50 + XGBoost (preferred when XGB_MODEL_PATH is set) ──────
+    # Wrapped in try/except: any XGB failure automatically falls back to MobileNetV2
+    try:
+        xgb_pred = _get_xgb_predictor()
+        if xgb_pred is not None:
+            idx, confidence = xgb_pred.predict(image_bytes)
+            raw_class       = CLASS_NAMES[idx]
+            crop, disease, healthy = parse_class_name(raw_class)
+            log.info(f"[ResNet50+XGB] {raw_class} ({confidence:.1%})")
+            return raw_class, confidence, crop, disease, healthy
+    except Exception as xgb_err:
+        log.error(f"[ResNet50+XGB] failed ({xgb_err}), falling back to MobileNetV2")
+
+    # ── 3. MobileNetV2 Keras model (legacy / default) ─────────────────────
+    model = get_ml_model()
     arr         = preprocess_image(image_bytes)
     preds       = model.predict(arr, verbose=0)
     idx         = int(np.argmax(preds[0]))
     confidence  = float(np.max(preds[0]))
     raw_class   = CLASS_NAMES[idx]
     crop, disease, healthy = parse_class_name(raw_class)
-    log.info(f"Predicted: {raw_class} ({confidence:.1%})")
+    log.info(f"[MobileNetV2] {raw_class} ({confidence:.1%})")
     return raw_class, confidence, crop, disease, healthy
 
 # ─── Gemini prompts ───────────────────────────────────────────────────────────
@@ -347,46 +715,59 @@ def _call_model(client, model_name: str, prompt: str, max_tokens: int) -> str:
 def _call_gemini_sync(prompt: str, max_tokens: int = 1200) -> Optional[str]:
     """
     Call Gemini using new google-genai SDK.
-    Model chain: gemini-2.5-flash → gemini-2.5-flash-lite → gemini-flash-latest → static fallback.
-    Retries once on transient errors. Skips retry on 429 (quota).
-    Returns None only if ALL models are quota-exhausted.
+    Iterates the key pool first, then the model chain per key.
+    Keys that hit 429/quota are marked exhausted for 1 hour and skipped.
+    Returns None only if ALL keys AND models are exhausted.
     """
     if not _GENAI_NEW_SDK:
         raise RuntimeError("google-genai SDK not installed")
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not configured")
+    if not GEMINI_KEY_POOL:
+        raise RuntimeError("No GEMINI_API_KEY configured")
 
     allowed, reason = _check_rate_limit()
     if not allowed:
         log.warning(f"Internal rate limit ({reason}) — skipping AI call")
         return None
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
     models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL, FALLBACK_MODEL_2]
 
-    for model_name in models_to_try:
-        for attempt in range(2):  # retry once per model on transient errors
-            try:
-                result = _call_model(client, model_name, prompt, max_tokens)
-                _record_ai_call()
-                log.info(f"Gemini success — model: {model_name}")
-                return result
+    for key in GEMINI_KEY_POOL:
+        if not _key_available(key):
+            log.info(f"Skipping exhausted key ...{key[-6:]}")
+            continue
 
-            except Exception as e:
-                log.error(f"Gemini error [{model_name}] attempt {attempt + 1}: {type(e).__name__}: {e}")
+        client = genai.Client(api_key=key)
+        log.info(f"Trying key ...{key[-6:]}")
 
-                if _is_quota_error(e):
-                    log.warning(f"Quota/429 on {model_name} — trying next model in chain")
-                    break  # move to next model, don't retry same model on 429
+        for model_name in models_to_try:
+            for attempt in range(2):  # retry once per model on transient errors
+                try:
+                    result = _call_model(client, model_name, prompt, max_tokens)
+                    _record_ai_call()
+                    log.info(f"Gemini success — key: ...{key[-6:]}, model: {model_name}")
+                    return result
 
-                if attempt == 0:
-                    log.info(f"Transient error on {model_name} — retrying in 2s")
-                    time.sleep(2.0)
-                else:
-                    log.warning(f"Transient error on {model_name} persisted after retry — trying next model")
-                    break
+                except Exception as e:
+                    log.error(f"Gemini error [key ...{key[-6:]}][{model_name}] attempt {attempt+1}: {type(e).__name__}: {e}")
 
-    log.error("All models in chain exhausted or quota-exceeded — returning None for static fallback")
+                    if _is_quota_error(e):
+                        # This model's quota exhausted for this key — try next model
+                        log.warning(f"Quota/429 on {model_name} (key ...{key[-6:]}) — trying next model")
+                        break  # move to next model
+
+                    if attempt == 0:
+                        log.info(f"Transient error — retrying {model_name} in 2s")
+                        time.sleep(2.0)
+                    else:
+                        log.warning(f"Transient error persisted on {model_name} — trying next model")
+                        break
+        else:
+            # All models for this key returned quota errors
+            _mark_key_exhausted(key)
+            log.warning(f"All models exhausted for key ...{key[-6:]} — trying next key in pool")
+            continue
+
+    log.error("All keys and models exhausted — returning None for static fallback")
     return None
 
 
@@ -406,7 +787,7 @@ def get_gemini_advisory(disease: str, confidence: float, crop: str,
     Get advisory from Gemini with proper fallback.
     ALWAYS returns a non-empty string — never fails visibly to the user.
     """
-    if not GEMINI_API_KEY or not _GENAI_NEW_SDK:
+    if not GEMINI_KEY_POOL or not _GENAI_NEW_SDK:
         log.warning("AI unavailable — using static fallback advisory")
         return _fallback_advisory(disease, crop, mode)
 
@@ -662,20 +1043,49 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 def health():
+    config_state = get_config_status()
     return {
         "status": "ok",
         "mock_mode": USE_MOCK_MODEL,
         "model_path": MODEL_PATH,
+        "config_source": "database",
         "ai_sdk": "google-genai (new)" if _GENAI_NEW_SDK else "unavailable",
         "primary_model": PRIMARY_MODEL,
         "daily_ai_calls": _daily_count,
         "daily_limit": RATE_LIMIT_RPD,
+        "gemini_key_pool": len(GEMINI_KEY_POOL),
+        "gemini_keys_available": sum(1 for k in GEMINI_KEY_POOL if _key_available(k)),
         "services": {
-            "gemini":    bool(GEMINI_API_KEY) and _GENAI_NEW_SDK,
-            "weather":   bool(WEATHER_API_KEY),
-            "agmarknet": bool(AGMARKNET_KEY),
+            "gemini":      bool(GEMINI_KEY_POOL) and _GENAI_NEW_SDK,
+            "weather":     config_state["WEATHER_API_KEY"],
+            "agmarknet":   config_state["AGMARKNET_KEY"],
+            "elevenlabs":  bool(ELEVENLABS_API_KEY),
+            "schemes":     bool(GOV_SCHEMES_URL) or True,
         }
     }
+
+@app.get("/api/config/status")
+def config_status():
+    return {
+        "config_source": "database",
+        "keys": get_config_status(),
+    }
+
+@app.post("/api/cache/clear")
+def clear_cache():
+    """Wipe the in-memory weather + mandi cache instantly."""
+    global _cache
+    cleared = len(_cache)
+    _cache.clear()
+    log.info(f"Cache cleared — {cleared} entries removed")
+    return {"cleared_entries": cleared, "status": "ok"}
+
+@app.post("/api/db/purge-stale")
+def purge_stale_db():
+    """Delete obsolete config keys (e.g. WHISPER_*) from the SQLite DB."""
+    removed = purge_stale_keys()
+    log.info(f"DB purge — removed stale keys: {removed}")
+    return {"removed_keys": removed, "status": "ok"}
 
 @app.get("/classes")
 def get_classes():
@@ -701,6 +1111,10 @@ async def analyze_image(
     image_bytes = await file.read()
     if len(image_bytes) > 10 * 1024 * 1024:
         raise HTTPException(413, "Image too large. Max 10 MB.")
+
+    is_crop, crop_error = validate_crop_image(image_bytes)
+    if not is_crop:
+        raise HTTPException(400, crop_error)
 
     try:
         raw_class, confidence, crop, disease, is_healthy = predict_disease(image_bytes)
@@ -755,7 +1169,7 @@ async def analyze_image(
 
     log.info(f"Analysis complete — disease: {disease}, crop: {crop}, severity: {severity}, ai_used: {bool(GEMINI_API_KEY)}")
 
-    return {
+    result_payload = {
         "raw_class":           raw_class,
         "disease":             disease,
         "crop":                crop,
@@ -769,6 +1183,15 @@ async def analyze_image(
         "weather_advisory":    weather_advisory,
         "mandi_advisory":      mandi_advisory,
     }
+
+    # Persist image + result to scan history (non-blocking — don't fail the request)
+    try:
+        scan_id = _save_scan(image_bytes, result_payload)
+        result_payload["scan_id"] = scan_id
+    except Exception as hist_err:
+        log.warning(f"Could not save scan to history: {hist_err}")
+
+    return result_payload
 
 @app.post("/advisory")
 def get_advisory(req: AdvisoryRequest):
@@ -800,6 +1223,44 @@ def get_advisory(req: AdvisoryRequest):
     }
 
 # ─── Secure Gemini Chat Proxy ─────────────────────────────────────────────────
+
+# ─── Scan History endpoints ───────────────────────────────────────────────────
+@app.get("/api/scan-history")
+def list_scan_history(limit: int = Query(default=30, le=100)):
+    """Return the most recent scan records (no image bytes — use /image for that)."""
+    return {"scans": _get_history(limit)}
+
+@app.get("/api/scan-history/{scan_id}/image")
+def get_scan_image(scan_id: str):
+    """Serve the original image for a past scan."""
+    # Validate ID is a UUID to prevent path traversal
+    try:
+        uuid.UUID(scan_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid scan ID format.")
+    img_path = _UPLOADS_DIR / f"{scan_id}.jpg"
+    if not img_path.exists():
+        raise HTTPException(404, "Image not found.")
+    return FileResponse(str(img_path), media_type="image/jpeg")
+
+@app.delete("/api/scan-history/{scan_id}")
+def delete_scan(scan_id: str):
+    """Delete a single scan record and its image."""
+    try:
+        uuid.UUID(scan_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid scan ID format.")
+    img_path = _UPLOADS_DIR / f"{scan_id}.jpg"
+    if img_path.exists():
+        img_path.unlink()
+    conn = _history_conn()
+    try:
+        conn.execute("DELETE FROM scan_history WHERE id = ?", (scan_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": scan_id}
+
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     """
@@ -810,7 +1271,7 @@ async def chat_endpoint(req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(400, "Question cannot be empty.")
 
-    if not GEMINI_API_KEY or not _GENAI_NEW_SDK:
+    if not GEMINI_KEY_POOL or not _GENAI_NEW_SDK:
         return {
             "response": "⚠️ AI is temporarily unavailable. Please try again in a few seconds, or consult your local KVK for immediate assistance.",
             "timestamp": __import__("datetime").datetime.now().isoformat(),
@@ -853,6 +1314,86 @@ async def chat_endpoint(req: ChatRequest):
             "timestamp": __import__("datetime").datetime.now().isoformat(),
             "fallback": True,
         }
+
+
+# ─── Whisper transcription proxy ────────────────────────────────────────────
+@app.post("/api/transcribe")
+async def transcribe_endpoint(
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(503, "ElevenLabs STT not configured. Set ELEVENLABS_API_KEY in backend .env.")
+
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(400, "Audio file is empty.")
+
+    # ElevenLabs language code (ISO 639-1)
+    lang_code = language.split("-")[0] if language else "en"
+
+    content_type = file.content_type or "audio/webm"
+    files = {"file": (file.filename or "audio.webm", audio_bytes, content_type)}
+    data = {
+        "model_id": ELEVENLABS_STT_MODEL,
+        "language_code": lang_code,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                ELEVENLABS_STT_URL,
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+                files=files,
+                data=data,
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(504, "ElevenLabs STT API timed out.")
+
+    if resp.status_code == 401:
+        detail = resp.json().get("detail", {})
+        if isinstance(detail, dict) and "missing_permissions" in detail.get("status", ""):
+            raise HTTPException(403, "ElevenLabs API key is missing the 'speech_to_text' permission. "
+                                     "Generate a new key at elevenlabs.io/app/settings/api-keys with that scope enabled.")
+        raise HTTPException(401, f"ElevenLabs authentication failed: {resp.text[:200]}")
+
+    if resp.status_code != 200:
+        detail = resp.text[:400]
+        raise HTTPException(resp.status_code, f"ElevenLabs STT failed: {detail}")
+
+    payload = resp.json()
+    # ElevenLabs returns {"text": "...", "words": [...], "language_code": "..."}
+    transcript = payload.get("text") or ""
+    if not transcript.strip():
+        raise HTTPException(502, "ElevenLabs STT returned an empty transcription.")
+
+    return {"text": transcript.strip()}
+
+
+# ─── Schemes proxy ───────────────────────────────────────────────────────────
+@app.get("/api/schemes")
+async def schemes_endpoint():
+    if GOV_SCHEMES_URL:
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(GOV_SCHEMES_URL)
+            if resp.status_code == 200:
+                payload = resp.json()
+                records = payload.get("records") or payload.get("data") or payload
+                if isinstance(records, list) and records and isinstance(records[0], dict):
+                    return {
+                        "source": "gov.in",
+                        "data": records,
+                        "lastUpdated": __import__("datetime").datetime.now().isoformat(),
+                    }
+        except Exception as e:
+            log.warning(f"Gov schemes fetch failed: {e}")
+
+    return {
+        "source": "local-fallback",
+        "data": DEFAULT_SCHEMES,
+        "lastUpdated": __import__("datetime").datetime.now().isoformat(),
+    }
 
 
 # ─── Weather Proxy (lat/lon or city) ──────────────────────────────────────────
@@ -1010,22 +1551,28 @@ async def mandi_endpoint(
     AGMARKNET_BASE = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
 
     if AGMARKNET_KEY:
+        # urllib.request preserves literal [ ] in the query string;
+        # httpx percent-encodes them (%5B/%5D) which data.gov.in rejects.
         url = (
             f"{AGMARKNET_BASE}?api-key={AGMARKNET_KEY}&format=json&limit={limit}"
-            f"&filters[State]={state}&filters[Commodity]={commodity}"
+            f"&filters[state.keyword]={state}&filters[commodity]={commodity}"
         )
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                res = await client.get(url)
-            data = res.json()
+        def _fetch_agmarknet():
+            req = urllib.request.Request(url, headers={"User-Agent": "KrishiMitra/1.0"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                return json.loads(resp.read())
 
-            if res.status_code == 200 and data.get("records"):
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _fetch_agmarknet)
+
+            if data.get("records"):
                 def calc_trend(records):
                     if len(records) < 2:
                         return "stable"
                     try:
-                        p1 = float(records[0].get("Modal_Price", 0))
-                        p2 = float(records[1].get("Modal_Price", 0))
+                        p1 = float(records[0].get("modal_price", 0))
+                        p2 = float(records[1].get("modal_price", 0))
                         if p1 > p2 * 1.02:
                             return "up"
                         if p1 < p2 * 0.98:
@@ -1039,17 +1586,17 @@ async def mandi_endpoint(
                 cleaned = []
                 for r in records:
                     cleaned.append({
-                        "mandi":      r.get("Market", "—"),
-                        "district":   r.get("District", state),
-                        "commodity":  r.get("Commodity", commodity),
-                        "variety":    r.get("Variety", "Common"),
-                        "minPrice":   r.get("Min_Price"),
-                        "maxPrice":   r.get("Max_Price"),
-                        "modalPrice": r.get("Modal_Price"),
-                        "price":      r.get("Modal_Price"),
+                        "mandi":      r.get("market", "—"),
+                        "district":   r.get("district", state),
+                        "commodity":  r.get("commodity", commodity),
+                        "variety":    r.get("variety", "Common"),
+                        "minPrice":   r.get("min_price"),
+                        "maxPrice":   r.get("max_price"),
+                        "modalPrice": r.get("modal_price"),
+                        "price":      r.get("modal_price"),
                         "trend":      trend,
-                        "date":       r.get("Arrival_Date"),
-                        "state":      r.get("State", state),
+                        "date":       r.get("arrival_date"),
+                        "state":      r.get("state", state),
                     })
 
                 result = {
@@ -1062,12 +1609,11 @@ async def mandi_endpoint(
                 return result
 
         except Exception as e:
-            log.error(f"Agmarknet fetch error: {e}")
+            log.error(f"Agmarknet fetch error [{type(e).__name__}]: {e}")
 
     # ── Fallback mock ──
     log.warning(f"Using mock mandi data for {state}/{commodity}")
-    state_prices = {
-        "Maharashtra": {"Tomato": [800,1200], "Onion": [500,900], "Wheat": [2100,2400], "Potato": [1100,1500]},
+    state_prices = {        "Maharashtra": {"Tomato": [800,1200], "Onion": [500,900], "Wheat": [2100,2400], "Potato": [1100,1500]},
         "Punjab":      {"Wheat": [2100,2500], "Rice": [1800,2200], "Maize": [1700,2000], "Potato": [1000,1400]},
         "Uttar Pradesh": {"Potato": [1200,1600], "Wheat": [2000,2300], "Sugarcane": [350,420], "Onion": [600,1000]},
         "Karnataka":   {"Tomato": [900,1400], "Onion": [600,1000], "Groundnut": [5000,6500], "Coconut": [1400,1900]},
@@ -1095,9 +1641,96 @@ async def mandi_endpoint(
             "date":       __import__("datetime").date.today().isoformat(),
             "state":      state,
         }],
-        "source":      "Estimated (Agmarknet key not configured)",
+        "source":      "Estimated" if AGMARKNET_KEY else "Estimated (Agmarknet key not configured)",
         "lastUpdated": __import__("datetime").datetime.now().isoformat(),
         "count":       1,
     }
     cache_set(cache_key, mock_result)
     return mock_result
+
+
+# ─── Fast2SMS — Send SMS proxy ────────────────────────────────────────────────
+# Fast2SMS free tier (route "v") only delivers to numbers registered on the
+# Fast2SMS test panel. Switch route to "q" after completing DLT registration
+# with TRAI and obtaining a DLT Template ID for production use.
+
+class SMSRequest(BaseModel):
+    numbers:  list[str]      # E.g. ["9876543210", "9123456789"]
+    message:  str
+    language: str = "Hindi"  # Informational; Fast2SMS uses Unicode automatically
+
+@app.post("/api/send-sms")
+async def send_sms_endpoint(req: SMSRequest):
+    """
+    Send bulk SMS via Fast2SMS.
+    API key is read from FAST2SMS_API_KEY env var — never exposed to frontend.
+
+    NOTE: Free tier (route="v") only works for numbers whitelisted in the
+    Fast2SMS sender dashboard. For production, switch to route="q" and supply
+    a DLT-approved template ID in the 'message_id' param.
+    """
+    api_key = os.getenv("FAST2SMS_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(503, "SMS service not configured. Set FAST2SMS_API_KEY in backend .env.")
+
+    if not req.numbers:
+        raise HTTPException(400, "At least one recipient number is required.")
+
+    if not req.message.strip():
+        raise HTTPException(400, "Message cannot be empty.")
+
+    if len(req.message) > 160:
+        raise HTTPException(400, "Message exceeds 160 characters.")
+
+    # Sanitise: keep only 10-digit numbers
+    clean_numbers = [n.strip() for n in req.numbers if n.strip().isdigit() and len(n.strip()) == 10]
+    if not clean_numbers:
+        raise HTTPException(400, "No valid 10-digit numbers provided.")
+
+    numbers_str = ",".join(clean_numbers)
+
+    params = {
+        "variables_values": req.message,
+        "route":            "v",          # "v" = promotional free tier; "q" = transactional (needs DLT)
+        "numbers":          numbers_str,
+        # Uncomment and set for DLT transactional route:
+        # "message_id": "YOUR_DLT_TEMPLATE_ID",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://www.fast2sms.com/dev/bulkV2",
+                headers={"authorization": api_key},
+                params=params,
+            )
+    except httpx.TimeoutException:
+        log.error("Fast2SMS API timed out")
+        raise HTTPException(504, "SMS gateway timed out. Please retry.")
+    except Exception as e:
+        log.error(f"Fast2SMS request error: {e}")
+        raise HTTPException(502, f"SMS gateway error: {str(e)}")
+
+    try:
+        payload = resp.json()
+    except Exception:
+        log.error(f"Fast2SMS non-JSON response: {resp.text[:300]}")
+        raise HTTPException(502, "Unexpected response from SMS gateway.")
+
+    if resp.status_code != 200 or not payload.get("return", False):
+        error_msg = payload.get("message", [resp.text[:200]])
+        if isinstance(error_msg, list):
+            error_msg = " ".join(error_msg)
+        log.warning(f"Fast2SMS error: {error_msg}")
+        raise HTTPException(400, f"SMS send failed: {error_msg}")
+
+    message_ids = payload.get("message_id") or payload.get("request_id") or []
+    if isinstance(message_ids, str):
+        message_ids = [message_ids]
+
+    log.info(f"Fast2SMS: sent to {len(clean_numbers)} numbers, ids={message_ids}")
+    return {
+        "success":     True,
+        "count":       len(clean_numbers),
+        "message_ids": message_ids,
+    }

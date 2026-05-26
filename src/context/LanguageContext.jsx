@@ -83,6 +83,9 @@ const translations = {
 
     // Government Text
     govText: "Government of India - Department of Agriculture",
+    // Extra nav
+    ndviMap: "NDVI Map",
+    smsAlerts: "SMS Alerts",
   },
 
   ml: {
@@ -163,6 +166,9 @@ const translations = {
 
     // Government Text
     govText: "കേരള സർക്കാർ - കാർഷിക വകുപ്പ്",
+    // Extra nav
+    ndviMap: "NDVI ഭൂപടം",
+    smsAlerts: "SMS അലർട്ടുകൾ",
   },
 
   hi: {
@@ -239,6 +245,9 @@ const translations = {
 
     // Government Text
     govText: "केरल सरकार - कृषि विभाग",
+    // Extra nav
+    ndviMap: "NDVI मानचित्र",
+    smsAlerts: "SMS अलर्ट",
   },
 };
 

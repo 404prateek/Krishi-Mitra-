@@ -4,18 +4,41 @@ dist/
 
 # Python
 venv/
+.venv*/
 __pycache__/
 *.pyc
+*.pyo
 
 # Backend env
 krishi-backend/venv/
+krishi-backend/.venv*/
+krishi-backend/__pycache__/
 
-# Model files (optional if large)
-*.h5
-*.tflite
+# Dataset (too large / long paths)
+krishi-backend/dataset/
+
+# Uploads folder
+krishi-backend/uploads/
+
+# ML cache files
+*.npy
+krishi-backend/model/features_cache.npy
+krishi-backend/model/labels_cache.npy
+
+# Local DB
+krishi-backend/config.db
+
+# Extracted zips / temp
+sms-feature-extracted/
+sms-feature .zip
+sms_demo_improved.html
+test_audio.wav
+write_sms.cjs
+"krishimitra-satellite .html"
 
 # Env files
 .env
+krishi-backend/.env
 
 # OS
 .DS_Store
