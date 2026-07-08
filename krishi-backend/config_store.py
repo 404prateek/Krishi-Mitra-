@@ -5,14 +5,18 @@ from pathlib import Path
 CONFIG_DB_PATH = Path(os.getenv("CONFIG_DB_PATH", Path(__file__).resolve().parent / "config.db"))
 CONFIG_KEYS = (
     "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "GROQ_API_KEY_2",
+    "GROQ_API_KEY_3",
+    "GROQ_API_KEY_4",
     "WEATHER_API_KEY",
     "AGMARKNET_KEY",
-    "ELEVENLABS_API_KEY",
-    "ELEVENLABS_STT_URL",
-    "ELEVENLABS_STT_MODEL",
+    "FAST2SMS_API_KEY",
+    "SARVAM_API_KEY",
     "GOV_SCHEMES_URL",
     "MODEL_PATH",
     "USE_MOCK_MODEL",
+    "XGB_MODEL_PATH",
 )
 
 
@@ -114,10 +118,13 @@ def set_api_key(key_name: str, value: str) -> str:
 def get_config_status() -> dict[str, bool]:
     settings = get_all_config()
     return {
-        "GEMINI_API_KEY":      bool(settings.get("GEMINI_API_KEY", "")),
-        "WEATHER_API_KEY":     bool(settings.get("WEATHER_API_KEY", "")),
-        "AGMARKNET_KEY":       bool(settings.get("AGMARKNET_KEY", "")),
-        "ELEVENLABS_API_KEY":  bool(settings.get("ELEVENLABS_API_KEY", "")),
+        "GEMINI_API_KEY":   bool(settings.get("GEMINI_API_KEY", "")),
+        "GROQ_API_KEY":     bool(settings.get("GROQ_API_KEY", "")),
+        "WEATHER_API_KEY":  bool(settings.get("WEATHER_API_KEY", "")),
+        "AGMARKNET_KEY":    bool(settings.get("AGMARKNET_KEY", "")),
+        "SARVAM_API_KEY":   bool(settings.get("SARVAM_API_KEY", "")),
+        "FAST2SMS_API_KEY": bool(settings.get("FAST2SMS_API_KEY", "")),
+        "XGB_MODEL_PATH":   bool(settings.get("XGB_MODEL_PATH", "")),
     }
 
 

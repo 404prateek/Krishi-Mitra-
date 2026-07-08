@@ -50,7 +50,7 @@ const ChatPage = () => {
   const [isListening, setIsListening] = useState(false)
   const [isSpeaking, setIsSpeaking]   = useState(false)
   const [voiceEnabled, setVoiceEnabled] = useState(true)
-  const [micError, setMicError]         = useState(null)   // null | 'no-support' | 'not-allowed' | 'no-speech' | 'network'
+  const [micError, setMicError]         = useState(null)   // null | 'no-support' | 'not-allowed' | 'no-speech' | 'network' | 'stt-not-configured' | 'stt-rate-limit'
   const [advisoryMode, setAdvisoryMode] = useState("detailed")
   const [selectedLanguage, setSelectedLanguage] = useState(() => currentLanguage || 'hi')
   const messagesEndRef = useRef(null)
@@ -216,9 +216,20 @@ const ChatPage = () => {
             return
           }
           setMicError('no-speech')
-          setTimeout(() => setMicError(null), 3000)
+          setTimeout(() => setMicError(null), 4000)
         } catch (error) {
-          setMicError('network')
+          // Show a visible error message for STT failures (503 = key not configured,
+          // network = connectivity issue). Falls back to browser speech recognition.
+          const status = error?.message?.match(/\((\d{3})\)/)?.[1]
+          if (status === '503') {
+            setMicError('stt-not-configured')
+          } else if (status === '429') {
+            setMicError('stt-rate-limit')
+          } else {
+            setMicError('network')
+          }
+          setTimeout(() => setMicError(null), 5000)
+          // Attempt browser fallback so user is not left with no input method
           startBrowserVoiceRecognition()
         }
       }
@@ -547,10 +558,12 @@ const ChatPage = () => {
               borderColor: micError === 'not-allowed' ? '#fecaca' : micError === 'no-support' ? '#fcd34d' : '#bae6fd',
             }}>
               <span>
-                {micError === 'not-allowed' && '🎙️ Microphone permission denied. Click the 🔒 icon in your browser address bar → allow mic.'}
-                {micError === 'no-support'  && '⚠️ Voice not supported. Use Chrome or Edge browser for voice input.'}
-                {micError === 'no-speech'   && '🔇 No speech detected. Tap mic and speak clearly.'}
-                {micError === 'network'     && '🌐 Voice needs internet. Check your connection.'}
+                {micError === 'not-allowed'        && '🎙️ Microphone permission denied. Click the 🔒 icon in your browser address bar → allow mic.'}
+                {micError === 'no-support'         && '⚠️ Voice not supported. Use Chrome or Edge browser for voice input.'}
+                {micError === 'no-speech'          && '🔇 No speech detected. Tap mic and speak clearly.'}
+                {micError === 'network'            && '🌐 Voice transcription needs internet. Check your connection and try again.'}
+                {micError === 'stt-not-configured' && '⚙️ Voice transcription not set up. Add SARVAM_API_KEY to backend .env to enable voice-to-text.'}
+                {micError === 'stt-rate-limit'     && '⏳ Voice service is busy. Please wait a moment and try again.'}
               </span>
               <button onClick={() => setMicError(null)} style={{ background:'none', border:'none', cursor:'pointer', fontSize:14, lineHeight:1 }}>✕</button>
             </div>

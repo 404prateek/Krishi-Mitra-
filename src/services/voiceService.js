@@ -28,8 +28,15 @@ class VoiceService {
 
     const languageMap = {
       'en': ['en-US', 'en-GB', 'en-IN', 'en'],
+      'hi': ['hi-IN', 'hi'],
       'ml': ['ml-IN', 'ml'],
-      'hi': ['hi-IN', 'hi']
+      'bn': ['bn-IN', 'bn-BD', 'bn'],
+      'te': ['te-IN', 'te'],
+      'mr': ['mr-IN', 'mr'],
+      'ta': ['ta-IN', 'ta'],
+      'gu': ['gu-IN', 'gu'],
+      'kn': ['kn-IN', 'kn'],
+      'pa': ['pa-IN', 'pa'],
     }
 
     const preferredLangs = languageMap[language] || ['en-US']
@@ -65,8 +72,15 @@ class VoiceService {
         // Set language even if no specific voice found
         const langMap = {
           'en': 'en-US',
-          'ml': 'ml-IN', 
-          'hi': 'hi-IN'
+          'hi': 'hi-IN',
+          'ml': 'ml-IN',
+          'bn': 'bn-IN',
+          'te': 'te-IN',
+          'mr': 'mr-IN',
+          'ta': 'ta-IN',
+          'gu': 'gu-IN',
+          'kn': 'kn-IN',
+          'pa': 'pa-IN',
         }
         utterance.lang = langMap[language] || 'en-US'
       }
@@ -98,8 +112,15 @@ class VoiceService {
     
     const languageMap = {
       'en': ['en-US', 'en-GB', 'en-IN', 'en'],
+      'hi': ['hi-IN', 'hi'],
       'ml': ['ml-IN', 'ml'],
-      'hi': ['hi-IN', 'hi']
+      'bn': ['bn-IN', 'bn-BD', 'bn'],
+      'te': ['te-IN', 'te'],
+      'mr': ['mr-IN', 'mr'],
+      'ta': ['ta-IN', 'ta'],
+      'gu': ['gu-IN', 'gu'],
+      'kn': ['kn-IN', 'kn'],
+      'pa': ['pa-IN', 'pa'],
     }
 
     const preferredLangs = languageMap[language] || ['en-US']

@@ -38,15 +38,15 @@ from config_store import (
     purge_stale_keys,
 )
 
-# ─── NEW SDK: google-genai (replaces deprecated google-generativeai) ──────────
+# ─── Groq SDK (chat LLM and AI advisory) ────────────────────────────────────────
 try:
-    from google import genai
-    from google.genai import types as genai_types
-    _GENAI_NEW_SDK = True
+    from groq import Groq as GroqClient
+    _GROQ_AVAILABLE = True
 except ImportError:
-    # graceful fallback — warn loudly
-    _GENAI_NEW_SDK = False
-    logging.warning("google-genai not installed. AI features disabled. Run: pip install google-genai")
+    _GROQ_AVAILABLE = False
+    logging.warning("groq not installed. AI features disabled. Run: pip install groq")
+
+# ─── (Removed duplicate Groq import check) ───
 
 load_dotenv()
 init_db()
@@ -135,52 +135,64 @@ def _get_history(limit: int = 30) -> list[dict]:
     finally:
         conn.close()
 
-GEMINI_API_KEY    = get_api_key("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+# ─── Groq key pool: rotate across keys when one hits rate limits ────────────────────
+GROQ_API_KEY      = get_api_key("GROQ_API_KEY")   or os.getenv("GROQ_API_KEY",   "")
 
-# ─── Gemini key pool: rotate across keys when one hits quota ─────────────────
-def _build_key_pool() -> list[str]:
-    """Collect all non-empty Gemini API keys in priority order."""
+def _build_groq_key_pool() -> list[str]:
+    """Collect all non-empty Groq API keys in priority order."""
     raw = [
-        GEMINI_API_KEY,
-        get_api_key("GEMINI_API_KEY_2") or os.getenv("GEMINI_API_KEY_2", ""),
-        get_api_key("GEMINI_API_KEY_3") or os.getenv("GEMINI_API_KEY_3", ""),
-        get_api_key("GEMINI_API_KEY_4") or os.getenv("GEMINI_API_KEY_4", ""),
+        GROQ_API_KEY,
+        get_api_key("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY_2", ""),
+        get_api_key("GROQ_API_KEY_3") or os.getenv("GROQ_API_KEY_3", ""),
+        get_api_key("GROQ_API_KEY_4") or os.getenv("GROQ_API_KEY_4", ""),
     ]
     return [k.strip() for k in raw if k.strip()]
 
-GEMINI_KEY_POOL: list[str] = _build_key_pool()
+GROQ_KEY_POOL: list[str] = _build_groq_key_pool()
 
-# Maps key → unix timestamp when it was marked exhausted. Resets after 1 hour.
-_key_exhausted_at: dict[str, float] = {}
-_KEY_COOLDOWN_SECS = 3600  # 1 hour — Gemini free-tier daily quota resets ~hourly
+# Maps key → unix timestamp when it was marked exhausted. Resets after 10 minutes.
+_groq_key_exhausted_at: dict[str, float] = {}
+_GROQ_KEY_COOLDOWN_SECS = 600  # 10 min — Groq rate limits reset quickly
 
-def _key_available(key: str) -> bool:
+def _groq_key_available(key: str) -> bool:
     """True if the key is not in the cooldown window."""
-    t = _key_exhausted_at.get(key)
+    t = _groq_key_exhausted_at.get(key)
     if t is None:
         return True
-    if time.time() - t >= _KEY_COOLDOWN_SECS:
-        del _key_exhausted_at[key]  # auto-recover after cooldown
+    if time.time() - t >= _GROQ_KEY_COOLDOWN_SECS:
+        del _groq_key_exhausted_at[key]  # auto-recover after cooldown
         return True
     return False
 
-def _mark_key_exhausted(key: str):
-    _key_exhausted_at[key] = time.time()
-    remaining = sum(1 for k in GEMINI_KEY_POOL if _key_available(k))
-    log.warning(f"Key ...{key[-6:]} marked exhausted. Keys still available: {remaining}/{len(GEMINI_KEY_POOL)}")
-WEATHER_API_KEY   = get_api_key("WEATHER_API_KEY") or os.getenv("WEATHER_API_KEY", "")
-AGMARKNET_KEY     = get_api_key("AGMARKNET_KEY") or os.getenv("AGMARKNET_KEY", "")
-ELEVENLABS_API_KEY = get_api_key("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_STT_URL = get_api_key("ELEVENLABS_STT_URL") or os.getenv(
-    "ELEVENLABS_STT_URL",
-    "https://api.elevenlabs.io/v1/speech-to-text",
-)
-ELEVENLABS_STT_MODEL = get_api_key("ELEVENLABS_STT_MODEL") or os.getenv("ELEVENLABS_STT_MODEL", "scribe_v1")
+def _groq_mark_key_exhausted(key: str):
+    _groq_key_exhausted_at[key] = time.time()
+    remaining = sum(1 for k in GROQ_KEY_POOL if _groq_key_available(k))
+    log.warning(f"Groq key ...{key[-6:]} marked exhausted. Keys still available: {remaining}/{len(GROQ_KEY_POOL)}")
+
+SARVAM_API_KEY    = get_api_key("SARVAM_API_KEY") or os.getenv("SARVAM_API_KEY", "")
+SARVAM_STT_URL    = "https://api.sarvam.ai/speech-to-text"
+FAST2SMS_API_KEY  = get_api_key("FAST2SMS_API_KEY") or os.getenv("FAST2SMS_API_KEY", "")
 GOV_SCHEMES_URL   = get_api_key("GOV_SCHEMES_URL") or os.getenv("GOV_SCHEMES_URL", "")
 MODEL_PATH        = get_api_key("MODEL_PATH") or os.getenv("MODEL_PATH", "./model/krishi_model.h5")
 USE_MOCK_MODEL    = (get_api_key("USE_MOCK_MODEL") or os.getenv("USE_MOCK_MODEL", "false")).lower() == "true"
 # ResNet50 + XGBoost hybrid model (optional — set XGB_MODEL_PATH in .env to activate)
-XGB_MODEL_PATH    = os.getenv("XGB_MODEL_PATH", "")
+XGB_MODEL_PATH    = get_api_key("XGB_MODEL_PATH") or os.getenv("XGB_MODEL_PATH", "")
+
+# ─── Groq client — pool-aware, rotates on rate limit ──────────────────────────────
+_groq_clients: dict[str, "GroqClient"] = {}  # key → GroqClient instance
+
+def _get_groq_client_for_key(key: str) -> "GroqClient":
+    """Return (and cache) a GroqClient for a specific API key."""
+    if key not in _groq_clients:
+        _groq_clients[key] = GroqClient(api_key=key)
+    return _groq_clients[key]
+
+def _get_next_groq_key() -> Optional[str]:
+    """Return the first available (non-exhausted) Groq key, or None."""
+    for key in GROQ_KEY_POOL:
+        if _groq_key_available(key):
+            return key
+    return None
 ALLOWED_ORIGINS   = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://localhost:3000"
@@ -331,25 +343,23 @@ DEFAULT_SCHEMES = [
 ]
 
 # ─── Model chain (fallback order when primary is overloaded) ─────────────────
-# gemini-2.0-flash is quota-exhausted on this project — excluded from chain
-PRIMARY_MODEL    = "gemini-2.5-flash"
-FALLBACK_MODEL   = "gemini-2.5-flash-lite"
-FALLBACK_MODEL_2 = "gemini-flash-latest"
+PRIMARY_MODEL    = "llama-3.3-70b-versatile"
+FALLBACK_MODEL   = "llama-3.1-8b-instant"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger("krishi")
 
 app = FastAPI(title="Krishi Mitra API", version="3.0.0")
+_cors_origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()] if ALLOWED_ORIGINS else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # dev — lock to ALLOWED_ORIGINS in prod
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ─── Rate Limiter (global, in-memory) ─────────────────────────────────────────
-# Gemini 2.5 Flash free tier: 10 RPM, 500 RPD
 _rate_window   = deque()          # timestamps of recent AI calls
 RATE_LIMIT_RPM = 8                # safe below the 10 RPM free-tier ceiling
 RATE_LIMIT_RPD = 450              # safe below the 500 RPD free-tier ceiling
@@ -533,6 +543,10 @@ def validate_crop_image(image_bytes: bytes) -> tuple[bool, str]:
     return True, ""
 
 
+# Minimum confidence to return a prediction — below this the image is too ambiguous.
+LOW_CONFIDENCE_THRESHOLD = 0.40
+
+
 def predict_disease(image_bytes: bytes):
     # ── 1. Mock mode ──────────────────────────────────────────────────────
     if USE_MOCK_MODEL:
@@ -552,7 +566,15 @@ def predict_disease(image_bytes: bytes):
             raw_class       = CLASS_NAMES[idx]
             crop, disease, healthy = parse_class_name(raw_class)
             log.info(f"[ResNet50+XGB] {raw_class} ({confidence:.1%})")
+            if confidence < LOW_CONFIDENCE_THRESHOLD:
+                raise HTTPException(
+                    422,
+                    f"Image unclear or crop not recognized (confidence: {confidence:.0%}). "
+                    "Please upload a clearer leaf or plant photo.",
+                )
             return raw_class, confidence, crop, disease, healthy
+    except HTTPException:
+        raise
     except Exception as xgb_err:
         log.error(f"[ResNet50+XGB] failed ({xgb_err}), falling back to MobileNetV2")
 
@@ -565,12 +587,18 @@ def predict_disease(image_bytes: bytes):
     raw_class   = CLASS_NAMES[idx]
     crop, disease, healthy = parse_class_name(raw_class)
     log.info(f"[MobileNetV2] {raw_class} ({confidence:.1%})")
+    if confidence < LOW_CONFIDENCE_THRESHOLD:
+        raise HTTPException(
+            422,
+            f"Image unclear or crop not recognized (confidence: {confidence:.0%}). "
+            "Please upload a clearer leaf or plant photo.",
+        )
     return raw_class, confidence, crop, disease, healthy
 
-# ─── Gemini prompts ───────────────────────────────────────────────────────────
+# ─── Groq AI prompts ───────────────────────────────────────────────────────────
 
 def _estimate_severity_from_confidence(confidence: float) -> str:
-    """Pre-estimate severity from model confidence for use in Gemini prompt."""
+    """Pre-estimate severity from model confidence for use in Groq prompt."""
     if confidence >= 0.85: return "Severe"
     if confidence >= 0.60: return "Moderate"
     return "Low"
@@ -691,103 +719,67 @@ Farmer's question: {question}"""
     return system_prompt
 
 
-# ─── Gemini AI helper (new SDK) ───────────────────────────────────────────────
+# ─── Groq AI helper (sync calls) ───────────────────────────────────────────────
 
-def _is_quota_error(e: Exception) -> bool:
-    """Detect 429 / quota exceeded errors only — NOT 503 service unavailable."""
-    msg = str(e).lower()
-    return "429" in msg or "quota" in msg or "resource_exhausted" in msg
-
-def _call_model(client, model_name: str, prompt: str, max_tokens: int) -> str:
-    """Single model call — raises on error."""
-    log.info(f"Gemini call — model: {model_name}")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=max_tokens,
-        ),
-    )
-    return response.text.strip()
-
-
-def _call_gemini_sync(prompt: str, max_tokens: int = 1200) -> Optional[str]:
+def _call_groq_sync(prompt: str, max_tokens: int = 1200) -> Optional[str]:
     """
-    Call Gemini using new google-genai SDK.
-    Iterates the key pool first, then the model chain per key.
-    Keys that hit 429/quota are marked exhausted for 1 hour and skipped.
-    Returns None only if ALL keys AND models are exhausted.
+    Call Groq (llama-3.3-70b-versatile) synchronously.
+    Iterates the key pool. Keys that hit 429/quota are marked exhausted.
+    Returns None only if ALL keys are exhausted or error.
     """
-    if not _GENAI_NEW_SDK:
-        raise RuntimeError("google-genai SDK not installed")
-    if not GEMINI_KEY_POOL:
-        raise RuntimeError("No GEMINI_API_KEY configured")
+    if not GROQ_KEY_POOL:
+        log.warning("No GROQ_API_KEY configured")
+        return None
 
     allowed, reason = _check_rate_limit()
     if not allowed:
         log.warning(f"Internal rate limit ({reason}) — skipping AI call")
         return None
 
-    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL, FALLBACK_MODEL_2]
-
-    for key in GEMINI_KEY_POOL:
-        if not _key_available(key):
-            log.info(f"Skipping exhausted key ...{key[-6:]}")
+    for key in GROQ_KEY_POOL:
+        if not _groq_key_available(key):
+            log.info(f"Skipping exhausted Groq key ...{key[-6:]}")
             continue
 
-        client = genai.Client(api_key=key)
-        log.info(f"Trying key ...{key[-6:]}")
+        groq_client = _get_groq_client_for_key(key)
+        log.info(f"Trying Groq key ...{key[-6:]}")
 
-        for model_name in models_to_try:
-            for attempt in range(2):  # retry once per model on transient errors
-                try:
-                    result = _call_model(client, model_name, prompt, max_tokens)
-                    _record_ai_call()
-                    log.info(f"Gemini success — key: ...{key[-6:]}, model: {model_name}")
-                    return result
+        try:
+            completion = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            result = completion.choices[0].message.content or ""
+            if not result.strip():
+                raise ValueError("Groq returned empty response")
 
-                except Exception as e:
-                    log.error(f"Gemini error [key ...{key[-6:]}][{model_name}] attempt {attempt+1}: {type(e).__name__}: {e}")
+            _record_ai_call()
+            log.info(f"Groq success — key: ...{key[-6:]}, chars: {len(result)}")
+            return result
 
-                    if _is_quota_error(e):
-                        # This model's quota exhausted for this key — try next model
-                        log.warning(f"Quota/429 on {model_name} (key ...{key[-6:]}) — trying next model")
-                        break  # move to next model
-
-                    if attempt == 0:
-                        log.info(f"Transient error — retrying {model_name} in 2s")
-                        time.sleep(2.0)
-                    else:
-                        log.warning(f"Transient error persisted on {model_name} — trying next model")
-                        break
-        else:
-            # All models for this key returned quota errors
-            _mark_key_exhausted(key)
-            log.warning(f"All models exhausted for key ...{key[-6:]} — trying next key in pool")
-            continue
-
-    log.error("All keys and models exhausted — returning None for static fallback")
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "rate_limit" in err_msg or "rate limit" in err_msg:
+                log.warning(f"Quota/429 on Groq key ...{key[-6:]} — trying next key")
+                _groq_mark_key_exhausted(key)
+                continue
+            log.error(f"Groq error [key ...{key[-6:]}]: {type(e).__name__}: {e}")
+            break # non-rate-limit error, abort loop
+    
+    log.error("All Groq keys exhausted or failed — returning None for static fallback")
     return None
 
 
-async def _call_gemini_async(prompt: str, max_tokens: int = 800) -> Optional[str]:
-    """Async wrapper for chat endpoint — runs sync call in thread pool."""
-    loop = asyncio.get_event_loop()
-    return await asyncio.wait_for(
-        loop.run_in_executor(None, lambda: _call_gemini_sync(prompt, max_tokens)),
-        timeout=30.0
-    )
-
-
-def get_gemini_advisory(disease: str, confidence: float, crop: str,
+def get_ai_advisory(disease: str, confidence: float, crop: str,
                          region: str, season: str, language: str, mode: str,
                          severity: str = "Moderate", land_acres: float = 2.0) -> str:
     """
-    Get advisory from Gemini with proper fallback.
+    Get advisory from Groq with proper fallback.
     ALWAYS returns a non-empty string — never fails visibly to the user.
     """
-    if not GEMINI_KEY_POOL or not _GENAI_NEW_SDK:
+    if not GROQ_KEY_POOL:
         log.warning("AI unavailable — using static fallback advisory")
         return _fallback_advisory(disease, crop, mode)
 
@@ -798,9 +790,9 @@ def get_gemini_advisory(disease: str, confidence: float, crop: str,
                                        severity=severity, land_acres=land_acres)
 
     try:
-        result = _call_gemini_sync(prompt, max_tokens=1200 if mode == "detailed" else 300)
+        result = _call_groq_sync(prompt, max_tokens=1200 if mode == "detailed" else 300)
         if result is None:
-            log.info("Gemini returned None (quota/rate limit) — using structured fallback")
+            log.info("Groq returned None (quota/rate limit) — using structured fallback")
             return _fallback_advisory(disease, crop, mode)
         if mode == "detailed":
             return _normalize_detailed_advisory(
@@ -1049,17 +1041,18 @@ def health():
         "mock_mode": USE_MOCK_MODEL,
         "model_path": MODEL_PATH,
         "config_source": "database",
-        "ai_sdk": "google-genai (new)" if _GENAI_NEW_SDK else "unavailable",
-        "primary_model": PRIMARY_MODEL,
+        "ai_sdk": "groq",
+        "primary_model": "llama-3.3-70b-versatile",
         "daily_ai_calls": _daily_count,
         "daily_limit": RATE_LIMIT_RPD,
-        "gemini_key_pool": len(GEMINI_KEY_POOL),
-        "gemini_keys_available": sum(1 for k in GEMINI_KEY_POOL if _key_available(k)),
+        "groq_key_pool": len(GROQ_KEY_POOL),
+        "groq_keys_available": sum(1 for k in GROQ_KEY_POOL if _groq_key_available(k)),
         "services": {
-            "gemini":      bool(GEMINI_KEY_POOL) and _GENAI_NEW_SDK,
+            "groq":        bool(GROQ_KEY_POOL),
+            "sarvam_stt":  bool(SARVAM_API_KEY),
             "weather":     config_state["WEATHER_API_KEY"],
             "agmarknet":   config_state["AGMARKNET_KEY"],
-            "elevenlabs":  bool(ELEVENLABS_API_KEY),
+            "fast2sms":    bool(FAST2SMS_API_KEY),
             "schemes":     bool(GOV_SCHEMES_URL) or True,
         }
     }
@@ -1124,12 +1117,12 @@ async def analyze_image(
         log.exception("Prediction failed")
         raise HTTPException(500, f"Prediction error: {e}")
 
-    advisory_short  = get_gemini_advisory(disease, confidence, crop, region, season, language, "short")
+    advisory_short  = get_ai_advisory(disease, confidence, crop, region, season, language, "short")
 
-    # Pre-estimate severity from ML confidence for use in the Gemini prompt
+    # Pre-estimate severity from ML confidence for use in the Groq prompt
     estimated_severity = _estimate_severity_from_confidence(confidence)
-    advisory_detail = get_gemini_advisory(disease, confidence, crop, region, season, language, "detailed",
-                                          severity=estimated_severity)
+    advisory_detail = get_ai_advisory(disease, confidence, crop, region, season, language, "detailed",
+                                      severity=estimated_severity)
 
     # Ensure advisory is NEVER empty
     if not advisory_short or not advisory_short.strip():
@@ -1167,7 +1160,7 @@ async def analyze_image(
         f"Healthy {crop} fetches a significant premium over diseased produce."
     )
 
-    log.info(f"Analysis complete — disease: {disease}, crop: {crop}, severity: {severity}, ai_used: {bool(GEMINI_API_KEY)}")
+    log.info(f"Analysis complete — disease: {disease}, crop: {crop}, severity: {severity}, ai_used: {bool(GROQ_KEY_POOL)}")
 
     result_payload = {
         "raw_class":           raw_class,
@@ -1195,7 +1188,7 @@ async def analyze_image(
 
 @app.post("/advisory")
 def get_advisory(req: AdvisoryRequest):
-    advisory = get_gemini_advisory(
+    advisory = get_ai_advisory(
         req.disease_name, req.confidence, req.crop,
         req.region, req.season, req.language, req.mode,
     )
@@ -1264,14 +1257,16 @@ def delete_scan(scan_id: str):
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     """
-    Secure chat endpoint — Gemini API key never leaves the server.
-    Frontend sends questions, backend adds context and calls Gemini.
-    If AI is unavailable (quota/error), returns a graceful friendly message.
+    Secure chat endpoint — uses Groq (llama-3.3-70b-versatile) as the primary LLM.
+    Rotates across the GROQ_KEY_POOL when a key hits rate limits.
+    Falls back gracefully if all keys are exhausted.
+    API keys never leave the server.
     """
     if not req.question.strip():
         raise HTTPException(400, "Question cannot be empty.")
 
-    if not GEMINI_KEY_POOL or not _GENAI_NEW_SDK:
+    if not GROQ_KEY_POOL or not _GROQ_AVAILABLE:
+        log.warning("Chat: Groq unavailable — returning fallback message")
         return {
             "response": "⚠️ AI is temporarily unavailable. Please try again in a few seconds, or consult your local KVK for immediate assistance.",
             "timestamp": __import__("datetime").datetime.now().isoformat(),
@@ -1282,91 +1277,156 @@ async def chat_endpoint(req: ChatRequest):
         req.question, req.state, req.weather_summary, req.active_crops, req.language
     )
 
-    try:
-        result = await _call_gemini_async(prompt, max_tokens=800)
+    # Try each available Groq key in pool order
+    for key in GROQ_KEY_POOL:
+        if not _groq_key_available(key):
+            log.info(f"Skipping exhausted Groq key ...{key[-6:]}")
+            continue
 
-        if result is None:
-            # Quota / rate limit — graceful response
-            log.warning("Chat: AI quota reached — returning graceful fallback message")
+        groq_client = _get_groq_client_for_key(key)
+
+        try:
+            loop = asyncio.get_event_loop()
+            completion = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.6,
+                        max_tokens=800,
+                    ),
+                ),
+                timeout=30.0,
+            )
+            result = completion.choices[0].message.content or ""
+
+            if not result.strip():
+                raise ValueError("Groq returned empty response")
+
+            log.info(f"Chat: Groq success — key: ...{key[-6:]}, chars: {len(result)}")
             return {
-                "response": "⚠️ AI is busy right now. Please try again in a few seconds. For urgent crop advice, contact your nearest KVK (Krishi Vigyan Kendra).",
+                "response":  result,
                 "timestamp": __import__("datetime").datetime.now().isoformat(),
-                "fallback": True,
+                "fallback": False,
             }
 
-        return {
-            "response":  result,
-            "timestamp": __import__("datetime").datetime.now().isoformat(),
-            "fallback": False,
-        }
+        except asyncio.TimeoutError:
+            log.error(f"Chat: Groq key ...{key[-6:]} timed out")
+            _groq_mark_key_exhausted(key)
+            continue
 
-    except asyncio.TimeoutError:
-        log.error("Chat: Gemini timed out")
-        return {
-            "response": "⚠️ AI took too long to respond. Please try again.",
-            "timestamp": __import__("datetime").datetime.now().isoformat(),
-            "fallback": True,
-        }
-    except Exception as e:
-        log.error(f"Chat endpoint error: {type(e).__name__}: {e}")
-        return {
-            "response": "⚠️ AI is temporarily unavailable. Please try again in a few seconds.",
-            "timestamp": __import__("datetime").datetime.now().isoformat(),
-            "fallback": True,
-        }
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "rate_limit" in err_msg or "rate limit" in err_msg:
+                log.warning(f"Chat: Groq key ...{key[-6:]} rate-limited — trying next key")
+                _groq_mark_key_exhausted(key)
+                continue
+            log.error(f"Chat endpoint error [key ...{key[-6:]}][{type(e).__name__}]: {e}")
+            # Non-rate-limit error — don’t exhaust the key, just break
+            break
+
+    # All keys exhausted or errored
+    log.warning("Chat: All Groq keys exhausted or failed — returning fallback")
+    return {
+        "response": "⚠️ AI is temporarily unavailable. All keys are busy — please try again in a few minutes.",
+        "timestamp": __import__("datetime").datetime.now().isoformat(),
+        "fallback": True,
+    }
 
 
-# ─── Whisper transcription proxy ────────────────────────────────────────────
+# ─── Sarvam AI — Speech-to-Text proxy ───────────────────────────────────────
+# Uses Sarvam's saaras:v3 model — supports Hindi, Tamil, Telugu, Malayalam,
+# Kannada, Bengali, Marathi, Gujarati, Odia, Punjabi and English.
+# Docs: https://docs.sarvam.ai/api-reference-docs/endpoints/speech-to-text
+
+# Map from app language codes to Sarvam BCP-47 language codes
+_SARVAM_LANG_MAP: dict[str, str] = {
+    "en": "en-IN",
+    "hi": "hi-IN",
+    "ml": "ml-IN",
+    "bn": "bn-IN",
+    "te": "te-IN",
+    "mr": "mr-IN",
+    "ta": "ta-IN",
+    "gu": "gu-IN",
+    "kn": "kn-IN",
+    "pa": "pa-IN",
+    "or": "or-IN",
+}
+
 @app.post("/api/transcribe")
 async def transcribe_endpoint(
     file: UploadFile = File(...),
     language: str = Form("en"),
 ):
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(503, "ElevenLabs STT not configured. Set ELEVENLABS_API_KEY in backend .env.")
+    """
+    Speech-to-text proxy via Sarvam AI (saaras:v3).
+    Accepts WebM/WAV audio from the frontend and returns the transcript.
+    SARVAM_API_KEY must be set in the backend .env.
+    """
+    if not SARVAM_API_KEY:
+        raise HTTPException(
+            503,
+            "Voice transcription not configured. Set SARVAM_API_KEY in backend .env. "
+            "Get a free key at https://dashboard.sarvam.ai/",
+        )
 
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(400, "Audio file is empty.")
 
-    # ElevenLabs language code (ISO 639-1)
-    lang_code = language.split("-")[0] if language else "en"
+    # Max 30 s / 10 MB per Sarvam docs
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Audio file too large. Max 10 MB (approx. 30 seconds).")
+
+    # Map language code → Sarvam BCP-47 code
+    lang_short = language.split("-")[0].lower() if language else "en"
+    sarvam_lang = _SARVAM_LANG_MAP.get(lang_short, "hi-IN")  # default hi-IN for Indian farmers
 
     content_type = file.content_type or "audio/webm"
-    files = {"file": (file.filename or "audio.webm", audio_bytes, content_type)}
-    data = {
-        "model_id": ELEVENLABS_STT_MODEL,
-        "language_code": lang_code,
-    }
+    filename = file.filename or f"audio_{lang_short}.webm"
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                ELEVENLABS_STT_URL,
-                headers={"xi-api-key": ELEVENLABS_API_KEY},
-                files=files,
-                data=data,
+                SARVAM_STT_URL,
+                headers={"api-subscription-key": SARVAM_API_KEY},
+                files={"file": (filename, audio_bytes, content_type)},
+                data={
+                    "model": "saaras:v3",
+                    "language_code": sarvam_lang,
+                    "mode": "transcribe",
+                },
             )
     except httpx.TimeoutException:
-        raise HTTPException(504, "ElevenLabs STT API timed out.")
+        log.error("Sarvam STT API timed out")
+        raise HTTPException(504, "Voice transcription timed out. Please try again.")
+    except Exception as e:
+        log.error(f"Sarvam STT request error: {e}")
+        raise HTTPException(502, f"Voice transcription request failed: {e}")
 
     if resp.status_code == 401:
-        detail = resp.json().get("detail", {})
-        if isinstance(detail, dict) and "missing_permissions" in detail.get("status", ""):
-            raise HTTPException(403, "ElevenLabs API key is missing the 'speech_to_text' permission. "
-                                     "Generate a new key at elevenlabs.io/app/settings/api-keys with that scope enabled.")
-        raise HTTPException(401, f"ElevenLabs authentication failed: {resp.text[:200]}")
+        raise HTTPException(401, "Invalid Sarvam API key. Check SARVAM_API_KEY in backend .env.")
+
+    if resp.status_code == 429:
+        raise HTTPException(429, "Sarvam STT rate limit hit. Please wait a moment and try again.")
 
     if resp.status_code != 200:
-        detail = resp.text[:400]
-        raise HTTPException(resp.status_code, f"ElevenLabs STT failed: {detail}")
+        log.error(f"Sarvam STT error {resp.status_code}: {resp.text[:300]}")
+        raise HTTPException(resp.status_code, f"Voice transcription failed: {resp.text[:200]}")
 
-    payload = resp.json()
-    # ElevenLabs returns {"text": "...", "words": [...], "language_code": "..."}
-    transcript = payload.get("text") or ""
+    try:
+        payload = resp.json()
+    except Exception:
+        raise HTTPException(502, "Unexpected response from Sarvam STT.")
+
+    # Sarvam returns {"transcript": "...", ...}
+    transcript = payload.get("transcript") or payload.get("text") or ""
     if not transcript.strip():
-        raise HTTPException(502, "ElevenLabs STT returned an empty transcription.")
+        raise HTTPException(502, "Voice transcription returned empty text. Please speak more clearly.")
 
+    log.info(f"Sarvam STT: transcribed {len(audio_bytes)//1024}KB audio in {sarvam_lang}")
     return {"text": transcript.strip()}
 
 
@@ -1669,7 +1729,7 @@ async def send_sms_endpoint(req: SMSRequest):
     Fast2SMS sender dashboard. For production, switch to route="q" and supply
     a DLT-approved template ID in the 'message_id' param.
     """
-    api_key = os.getenv("FAST2SMS_API_KEY", "").strip()
+    api_key = (FAST2SMS_API_KEY or "").strip()
     if not api_key:
         raise HTTPException(503, "SMS service not configured. Set FAST2SMS_API_KEY in backend .env.")
 

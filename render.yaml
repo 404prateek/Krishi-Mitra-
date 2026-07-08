@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: krishi-backend
+    runtime: python
+    rootDir: krishi-backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_API_KEY_2
+        sync: false
+      - key: GROQ_API_KEY_3
+        sync: false
+      - key: GROQ_API_KEY_4
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: WEATHER_API_KEY
+        sync: false
+      - key: AGMARKNET_KEY
+        sync: false
+      - key: FAST2SMS_API_KEY
+        sync: false
+      - key: MODEL_PATH
+        value: ./model/krishi_model.h5
+      - key: USE_MOCK_MODEL
+        value: "false"
+      - key: XGB_MODEL_PATH
+        value: ""
+      - key: ALLOWED_ORIGINS
+        value: "https://krishi-mitra-nu.vercel.app,http://localhost:5173"

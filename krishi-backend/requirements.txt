@@ -7,8 +7,11 @@ numpy==1.26.4
 pydantic==2.7.1
 httpx==0.27.0
 
-# New google-genai SDK (replaces deprecated google-generativeai)
-google-genai>=1.0.0
+# Groq SDK (chat LLM — llama-3.3-70b-versatile)
+groq>=0.9.0
+
+# Sarvam AI SDK (speech-to-text — saaras:v3)
+sarvamai>=0.1.28
 
 # TensorFlow — used by both the MobileNetV2 model and the ResNet50 feature extractor
 tensorflow==2.16.1
@@ -17,3 +20,6 @@ tensorflow==2.16.1
 xgboost>=2.0.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
+
+# Training script dependency
+tqdm>=4.60.0
